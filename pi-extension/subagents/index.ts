@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { keyHint } from "@mariozechner/pi-coding-agent";
+import { getModel, type Model } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -261,18 +262,62 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
   registerModelProviderExtension,
 };
 
-function resolveModelProviderExtension(model: string | undefined): string | null {
-  const separator = model?.indexOf("/") ?? -1;
-  if (!model || separator <= 0) return null;
-  const provider = model.slice(0, separator);
+function modelReplaySignature(model: Model<any>): string {
+  return JSON.stringify({
+    provider: model.provider,
+    id: model.id,
+    name: model.name,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    input: model.input,
+    cost: model.cost,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    headers: model.headers,
+    compat: model.compat,
+  });
+}
+
+function resolveModelProviderExtension(model: Model<any>): string | null {
+  const provider = model.provider;
   const extensionPath = MODEL_PROVIDER_EXTENSIONS.get(provider);
-  if (extensionPath === undefined) return null;
-  if (!isLoadableExtensionPath(extensionPath)) {
-    throw new Error(
-      `Cannot pin registered model provider "${provider}" because its extension is no longer loadable: ${extensionPath}`,
-    );
+  if (extensionPath !== undefined) {
+    if (!isLoadableExtensionPath(extensionPath)) {
+      throw new Error(
+        `Cannot pin registered model provider "${provider}" because its extension is no longer loadable: ${extensionPath}`,
+      );
+    }
+    return extensionPath;
   }
-  return extensionPath;
+
+  const builtInModel = getModel(provider as any, model.id as any) as Model<any> | undefined;
+  if (builtInModel && modelReplaySignature(model) === modelReplaySignature(builtInModel)) return null;
+  throw new Error(
+    `Model provider "${provider}" is custom or overrides Pi's built-in model metadata, ` +
+      `but no loadable backing extension was registered with registerModelProviderExtension`,
+  );
+}
+
+function resolveRuntimeModel(
+  modelReference: string | undefined,
+  modelRegistry: { find(provider: string, modelId: string): Model<any> | undefined; getAll(): Model<any>[] },
+): Model<any> {
+  if (!modelReference) throw new Error("Cannot resolve an empty Pi model reference");
+  const separator = modelReference.indexOf("/");
+  if (separator > 0) {
+    const model = modelRegistry.find(
+      modelReference.slice(0, separator),
+      modelReference.slice(separator + 1),
+    );
+    if (model) return model;
+  } else {
+    const matches = modelRegistry.getAll().filter((model) => model.id === modelReference);
+    if (matches.length === 1) return matches[0];
+  }
+  throw new Error(
+    `Cannot safely resolve exact Pi model metadata for "${modelReference}"; use provider/model-id`,
+  );
 }
 
 /**
@@ -1328,6 +1373,7 @@ export const __test__ = {
   resolveLaunchModel,
   resolveCliLaunchModel,
   resolveModelProviderExtension,
+  resolveRuntimeModel,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
@@ -1376,6 +1422,10 @@ async function launchSubagent(
     sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
     cwd: string;
     model: { provider: string; id: string } | undefined;
+    modelRegistry: {
+      find(provider: string, modelId: string): Model<any> | undefined;
+      getAll(): Model<any>[];
+    };
   },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
@@ -1385,8 +1435,9 @@ async function launchSubagent(
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
   const cli = agentDefs?.cli === "claude" ? "claude" : "pi";
   const effectiveModel = resolveCliLaunchModel(cli, params.model, agentDefs?.model, ctx.model);
+  const runtimeModel = cli === "pi" ? resolveRuntimeModel(effectiveModel, ctx.modelRegistry) : null;
   const modelProviderExtension =
-    cli === "pi" ? resolveModelProviderExtension(effectiveModel) : null;
+    runtimeModel ? resolveModelProviderExtension(runtimeModel) : null;
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1546,7 +1597,7 @@ async function launchSubagent(
     return running;
   }
 
-  if (!effectiveModel || !toolAllowlist) {
+  if (!runtimeModel || !toolAllowlist) {
     throw new Error("Cannot launch subagent without an exact model and tool snapshot");
   }
 
@@ -1567,7 +1618,7 @@ async function launchSubagent(
     agent: params.agent ?? null,
     toolAllowlist,
     toolExtensions,
-    model: effectiveModel,
+    model: `${runtimeModel.provider}/${runtimeModel.id}`,
     modelProviderExtension,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,

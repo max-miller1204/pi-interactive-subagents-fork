@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import { getModel } from "@mariozechner/pi-ai";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -1319,19 +1320,22 @@ describe("subagent discovery", () => {
       const providerName = `corporate_${Date.now()}_${Math.random()}`;
       const provider = join(dir, "corporate-provider.ts");
       writeFileSync(provider, "export default () => {};", "utf8");
-      assert.equal(
-        testApi.resolveModelProviderExtension(`${providerName}/model`),
-        null,
+      const builtIn = getModel("anthropic", "claude-sonnet-4-5");
+      assert.equal(testApi.resolveModelProviderExtension(builtIn), null);
+      const overridden = { ...builtIn, baseUrl: "https://corporate.example/v1" };
+      assert.throws(
+        () => testApi.resolveModelProviderExtension(overridden),
+        /custom or overrides Pi's built-in model metadata/,
       );
-      assert.equal(testApi.resolveModelProviderExtension("bare-built-in-model"), null);
       subagentsModule.registerModelProviderExtension(providerName, provider);
+      const custom = { ...builtIn, provider: providerName, id: "model" };
       assert.equal(
-        testApi.resolveModelProviderExtension(`${providerName}/model`),
+        testApi.resolveModelProviderExtension(custom),
         provider,
       );
       rmSync(provider);
       assert.throws(
-        () => testApi.resolveModelProviderExtension(`${providerName}/model`),
+        () => testApi.resolveModelProviderExtension(custom),
         /extension is no longer loadable/,
       );
     });

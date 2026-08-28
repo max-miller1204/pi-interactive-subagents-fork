@@ -149,6 +149,8 @@ Spawns must name a known agent at **every** depth. A top-level session may spawn
 
 Child-only tools that are not present in the parent's tool inventory can use the compatibility hook `registerToolExtension(name, absolutePath)` on `globalThis.__pi_interactive_subagents`. The path must name an existing file. The original `~/.pi/agent/extensions/web-search`, `web-fetch`, and related pi-config locations remain deprecated fallbacks for compatibility.
 
+Pi does not currently expose model-provider source paths. Extensions that call `pi.registerProvider(...)` must also call `globalThis.__pi_interactive_subagents.registerModelProviderExtension(providerName, absoluteExtensionPath)` before launching sub-agents. The launcher compares public active-model metadata with Pi's built-in catalog: unchanged built-ins launch normally, while custom or observably overridden providers fail closed without a registered backing file. Provider changes that do not appear in public model metadata, such as request-only headers or stream handlers, cannot be detected automatically, so their extension must use this protocol.
+
 ## Role folders
 
 `cwd` starts a sub-agent in a directory with its own config, so role-specific context and skills apply. Restricted agents still use `--no-extensions`; a role-specific extension tool must already be represented by parent provenance or the explicit compatibility registration hook:
