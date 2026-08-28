@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
@@ -1325,6 +1325,23 @@ describe("subagent discovery", () => {
         () => subagentsModule.registerToolExtension("read", provider),
         /shadows a built-in/,
       );
+    });
+  });
+
+  it("normalizes relative and Pi-style home config directories", () => {
+    withTempDir((dir) => {
+      const previousCwd = process.cwd();
+      const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+      try {
+        process.chdir(dir);
+        process.env.PI_CODING_AGENT_DIR = "relative-agent";
+        assert.equal(testApi.getAgentConfigDir(), join(process.cwd(), "relative-agent"));
+        process.env.PI_CODING_AGENT_DIR = "~/custom-pi-agent";
+        assert.equal(testApi.getAgentConfigDir(), join(homedir(), "custom-pi-agent"));
+      } finally {
+        process.chdir(previousCwd);
+        restoreEnvVar("PI_CODING_AGENT_DIR", previousAgentDir);
+      }
     });
   });
 

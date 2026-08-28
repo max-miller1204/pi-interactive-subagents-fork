@@ -167,7 +167,15 @@ const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", 
 
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 function getAgentConfigDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  if (!configured) return join(homedir(), ".pi", "agent");
+  const expanded =
+    configured === "~"
+      ? homedir()
+      : configured.startsWith("~/")
+        ? join(homedir(), configured.slice(2))
+        : configured;
+  return resolve(expanded);
 }
 
 // ── Tool-extension provenance and compatibility registration ────────────────
@@ -1271,6 +1279,7 @@ export const __test__ = {
   renderSubagentWidgetLines,
   loadAgentDefaults,
   discoverAgentDefinitions,
+  getAgentConfigDir,
   resolveEffectiveSessionMode,
   resolveLaunchModel,
   resolveCliLaunchModel,
