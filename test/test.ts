@@ -340,6 +340,7 @@ describe("session.ts", () => {
         subagent_message: "/extensions/subagents.ts",
         subagents_list: "/extensions/subagents.ts",
       },
+      nativeTools: ["read", "write", "edit"],
       model: "openrouter/z-ai/glm-5.2",
       modelProviderExtension: null,
       thinking: "medium",
@@ -392,6 +393,9 @@ describe("session.ts", () => {
         { model: "" },
         { modelProviderExtension: undefined },
         { modelProviderExtension: "relative/provider.ts" },
+        { nativeTools: undefined },
+        { nativeTools: ["read", "read"] },
+        { nativeTools: [""] },
         { toolAllowlist: null },
         { toolAllowlist: "" },
       ]) {
@@ -1267,15 +1271,23 @@ describe("subagent discovery", () => {
       writeFileSync(provider, "export default () => {};", "utf8");
       const tools = [
         { name: "read", sourceInfo: { path: "<builtin:read>", source: "builtin" } },
+        { name: "bash", sourceInfo: { path: provider, source: "extension" } },
+        { name: "future_builtin", sourceInfo: { path: "<builtin:future_builtin>", source: "builtin" } },
         { name: "sdk_tool", sourceInfo: { path: "<sdk:sdk_tool>", source: "sdk" } },
         { name: "web_search", sourceInfo: { path: provider, source: "npm:pi-web-access" } },
       ];
 
       assert.equal(testApi.getToolExtensionPath("read", tools), undefined);
+      assert.equal(testApi.getToolExtensionPath("bash", tools), provider);
+      assert.equal(testApi.getToolExtensionPath("future_builtin", tools), undefined);
       assert.equal(testApi.getToolExtensionPath("sdk_tool", tools), undefined);
       assert.equal(testApi.getToolExtensionPath("web_search", tools), provider);
       assert.ok(testApi.getToolExtensionPath("safe_bash", tools)?.endsWith("tools/safe-bash.ts"));
       assert.ok(testApi.getToolExtensionPath("subagent", tools)?.endsWith("index.ts"));
+      const manifest = testApi.resolveToolExtensionManifest("read,bash,future_builtin", tools);
+      assert.deepEqual({ ...manifest.toolExtensions }, { bash: provider });
+      assert.deepEqual(manifest.nativeTools, ["read", "future_builtin"]);
+      assert.deepEqual(manifest.unresolved, []);
     });
   });
 
@@ -1297,6 +1309,7 @@ describe("subagent discovery", () => {
         web_search: provider,
         fetch_content: provider,
       });
+      assert.deepEqual(resolution.nativeTools, ["read"]);
       assert.deepEqual(resolution.unresolved, ["missing_tool"]);
     });
   });
@@ -1311,6 +1324,7 @@ describe("subagent discovery", () => {
       assert.equal(Object.getPrototypeOf(resolution.toolExtensions), null);
       assert.equal(Object.hasOwn(resolution.toolExtensions, "__proto__"), true);
       assert.equal(resolution.toolExtensions.__proto__, provider);
+      assert.deepEqual(resolution.nativeTools, []);
       assert.deepEqual(resolution.unresolved, []);
     });
   });
@@ -1322,6 +1336,13 @@ describe("subagent discovery", () => {
       writeFileSync(provider, "export default () => {};", "utf8");
       const builtIn = getModel("anthropic", "claude-sonnet-4-5");
       assert.equal(testApi.resolveModelProviderExtension(builtIn), null);
+      assert.equal(
+        testApi.resolveModelProviderExtension({
+          ...builtIn,
+          externalRequestConfig: { headers: { "x-routing": "mutable" } },
+        } as any),
+        null,
+      );
       const overridden = { ...builtIn, baseUrl: "https://corporate.example/v1" };
       assert.throws(
         () => testApi.resolveModelProviderExtension(overridden),
@@ -1539,6 +1560,7 @@ describe("subagent discovery", () => {
               new URL("../pi-extension/subagents/index.ts", import.meta.url),
             ),
           },
+          nativeTools: ["read", "write"],
           model: "openrouter/z-ai/glm-5.2",
           modelProviderExtension: null,
           thinking: "medium",
@@ -1587,6 +1609,7 @@ describe("subagent discovery", () => {
             web_search: pinnedProvider,
             fetch_content: pinnedProvider,
           },
+          nativeTools: [],
           model: "openrouter/test-model",
           modelProviderExtension: pinnedProvider,
           thinking: null,
@@ -1618,6 +1641,7 @@ describe("subagent discovery", () => {
           agent: "scout",
           toolAllowlist: "read,ask_question",
           toolExtensions: {},
+          nativeTools: ["read"],
           model: "corporate/model",
           modelProviderExtension: provider,
           thinking: null,
@@ -1662,6 +1686,7 @@ describe("subagent discovery", () => {
         agent: "researcher",
         toolAllowlist: "web_search,ask_question",
         toolExtensions: { web_search: join(d, "removed-provider.ts") },
+        nativeTools: [],
         model: "openrouter/test-model",
         modelProviderExtension: null,
         thinking: null,
@@ -1685,6 +1710,7 @@ describe("subagent discovery", () => {
           ...missingSnapshot,
           toolAllowlist: "toString,ask_question",
           toolExtensions: {},
+          nativeTools: [],
         }),
         /no backing extension for "toString"/,
       );
@@ -1701,6 +1727,7 @@ describe("subagent discovery", () => {
           agent: null,
           toolAllowlist: "read,write,ask_question",
           toolExtensions: {},
+          nativeTools: ["read", "write"],
           model: "openrouter/test-model",
           modelProviderExtension: null,
           thinking: null,

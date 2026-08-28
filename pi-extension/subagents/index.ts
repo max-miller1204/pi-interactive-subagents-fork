@@ -190,6 +190,7 @@ interface ToolSourceMetadata {
 
 export interface ToolExtensionResolution {
   toolExtensions: Record<string, string>;
+  nativeTools: string[];
   unresolved: string[];
 }
 
@@ -330,7 +331,19 @@ function getToolExtensionPath(
   tool: string,
   availableTools: readonly ToolSourceMetadata[] = latestPi?.getAllTools() ?? [],
 ): string | undefined {
-  if (BUILTIN_TOOLS.has(tool) || tool === "ask_question") return undefined;
+  if (tool === "ask_question") return undefined;
+
+  const parentTool = availableTools.find((candidate) => candidate.name === tool);
+  if (parentTool) {
+    const sourceInfo = parentTool.sourceInfo;
+    if (sourceInfo?.source === "builtin") return undefined;
+    if (sourceInfo?.source !== "sdk" && isLoadableExtensionPath(sourceInfo?.path)) {
+      return sourceInfo.path;
+    }
+    return undefined;
+  }
+
+  if (BUILTIN_TOOLS.has(tool)) return undefined;
 
   // Repository-owned tools have stable entry points even when they are not
   // registered in the top-level parent process.
@@ -339,21 +352,6 @@ function getToolExtensionPath(
   }
   if (tool === "safe_bash") {
     return join(SUBAGENTS_DIR, "tools", "safe-bash.ts");
-  }
-
-  const parentTool = availableTools.find((candidate) => candidate.name === tool);
-  if (parentTool) {
-    const sourceInfo = parentTool.sourceInfo;
-    if (
-      sourceInfo?.source !== "builtin" &&
-      sourceInfo?.source !== "sdk" &&
-      isLoadableExtensionPath(sourceInfo?.path)
-    ) {
-      return sourceInfo.path;
-    }
-    // A known parent tool with unusable provenance must fail closed. Falling
-    // through could bind the child to a different registered/legacy provider.
-    return undefined;
   }
 
   const registered = EXTRA_TOOL_EXTENSIONS.get(tool);
@@ -377,16 +375,22 @@ function resolveToolExtensionManifest(
   availableTools: readonly ToolSourceMetadata[] = latestPi?.getAllTools() ?? [],
 ): ToolExtensionResolution {
   const toolExtensions: Record<string, string> = Object.create(null);
+  const nativeTools: string[] = [];
   const unresolved: string[] = [];
 
   for (const tool of toolAllowlist.split(",").map((name) => name.trim()).filter(Boolean)) {
-    if (BUILTIN_TOOLS.has(tool) || tool === "ask_question") continue;
+    if (tool === "ask_question") continue;
+    const parentTool = availableTools.find((candidate) => candidate.name === tool);
+    if (parentTool?.sourceInfo?.source === "builtin" || (!parentTool && BUILTIN_TOOLS.has(tool))) {
+      nativeTools.push(tool);
+      continue;
+    }
     const extensionPath = getToolExtensionPath(tool, availableTools);
     if (extensionPath) toolExtensions[tool] = extensionPath;
     else unresolved.push(tool);
   }
 
-  return { toolExtensions, unresolved };
+  return { toolExtensions, nativeTools, unresolved };
 }
 
 /**
@@ -1040,7 +1044,8 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
     loadout.version !== 2 ||
     !loadout.toolExtensions ||
     typeof loadout.toolExtensions !== "object" ||
-    Array.isArray(loadout.toolExtensions)
+    Array.isArray(loadout.toolExtensions) ||
+    !Array.isArray(loadout.nativeTools)
   ) {
     return "sandbox snapshot predates extension-manifest pinning";
   }
@@ -1049,8 +1054,14 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
     loadout.toolAllowlist
       .split(",")
       .map((tool) => tool.trim())
-      .filter((tool) => tool && !BUILTIN_TOOLS.has(tool) && tool !== "ask_question"),
+      .filter((tool) => tool && tool !== "ask_question"),
   );
+  const nativeTools = new Set(loadout.nativeTools);
+  for (const tool of nativeTools) {
+    if (!requiredTools.delete(tool)) {
+      return `sandbox snapshot includes unallowlisted native tool "${tool}"`;
+    }
+  }
   for (const tool of requiredTools) {
     if (!Object.hasOwn(loadout.toolExtensions, tool)) {
       return `sandbox snapshot has no backing extension for "${tool}"`;
@@ -1453,6 +1464,7 @@ async function launchSubagent(
     defaultTools,
   });
   let toolExtensions: Record<string, string> = {};
+  let nativeTools: string[] = [];
 
   if (toolAllowlist && cli === "pi") {
     const resolution = resolveToolExtensionManifest(toolAllowlist);
@@ -1464,6 +1476,7 @@ async function launchSubagent(
       );
     }
     toolExtensions = resolution.toolExtensions;
+    nativeTools = resolution.nativeTools;
   }
 
   const sessionFile = ctx.sessionManager.getSessionFile();
@@ -1618,6 +1631,7 @@ async function launchSubagent(
     agent: params.agent ?? null,
     toolAllowlist,
     toolExtensions,
+    nativeTools,
     model: `${runtimeModel.provider}/${runtimeModel.id}`,
     modelProviderExtension,
     thinking: effectiveThinking ?? null,

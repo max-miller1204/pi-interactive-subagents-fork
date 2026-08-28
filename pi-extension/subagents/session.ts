@@ -103,6 +103,7 @@ export interface SubagentLoadout {
   toolAllowlist: string;
   /** Allowed extension-backed tool name → exact extension entry file. */
   toolExtensions: Record<string, string>;
+  nativeTools: string[];
   /** Exact model id (without thinking suffix) used by the child. */
   model: string;
   modelProviderExtension: string | null;
@@ -155,6 +156,13 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     return false;
   }
   if (!Object.values(toolExtensions).every((path) => typeof path === "string")) return false;
+  if (
+    !Array.isArray(loadout.nativeTools) ||
+    !loadout.nativeTools.every((tool) => typeof tool === "string" && tool.trim().length > 0) ||
+    new Set(loadout.nativeTools).size !== loadout.nativeTools.length
+  ) {
+    return false;
+  }
   if (
     loadout.version !== 2 ||
     !isNullableString(loadout.agent) ||
