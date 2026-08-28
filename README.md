@@ -30,7 +30,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 | Tool | Description |
 | --- | --- |
 | `subagent` | Spawn a sub-agent in a dedicated tmux pane (async) |
-| `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
+| `subagent_message` | Message a sub-agent by name — steers it if running, resumes a finished Pi-backed session |
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
 
@@ -53,18 +53,19 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 
 ### Messaging
 
-`subagent_message` is addressed **by name only**. Names are unique per session and persist after a sub-agent finishes, so the same name works either way:
+`subagent_message` is addressed **by name only**. Pi-backed names are unique per session and persist after a sub-agent finishes, so the same name works either way:
 
 ```typescript
 subagent_message({ name: "scout", message: "Also check the auth middleware" });
 ```
 
 - **Running** — the message is typed into the live pane (newlines flattened) and picked up at the next turn boundary. The call returns immediately; the eventual completion still arrives as a steer message.
-- **Finished** — the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
+- **Finished Pi session** — the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
+- **Claude CLI agent** — messageable while its pane is running, but not resumable after completion because it has no Pi session file.
 
-Every spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name isn't registered, the session file is gone, or the session predates sandboxed resume.
+Every Pi-backed spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name isn't registered, the session file is gone, the session predates extension-manifest snapshots, or a pinned extension file is no longer installed.
 
-**Resume replays the original sandbox.** At spawn time the fully-resolved loadout — tool allowlist, backing extensions, model, thinking level, system prompt, spawn whitelist, cwd — is snapshotted to `<session>.loadout.json`. Resume rebuilds the exact same restricted process from that snapshot rather than relaunching unrestricted.
+**Resume replays the original sandbox.** At spawn time the fully-resolved loadout — tool allowlist, exact backing extension entry paths, model, thinking level, system prompt, spawn whitelist, cwd — is snapshotted to `<session>.loadout.json`. Resume uses only those pinned paths; it never re-resolves tools from the current parent or falls back to unrestricted global discovery.
 
 ### ask_question
 
@@ -108,7 +109,7 @@ You are a specialized agent that does X...
 | `description` | string | Shown in `subagents_list` |
 | `model` | string | Default model |
 | `thinking` | string | `minimal`, `low`, `medium`, or `high` |
-| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `web_fetch`, `safe_bash`, `video_extract`, `youtube_search`, `google_image_search`. Only the extensions backing the listed tools are loaded into the child |
+| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Any extension tool loaded in the parent can be used when Pi reports a loadable `sourceInfo.path`; `safe_bash` is bundled. Only the extensions backing listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
@@ -140,15 +141,17 @@ Controls whether `stalled`/`recovered` status transitions send a steer message t
 
 ## Tool access control
 
-Access is **whitelist-only**. Every sub-agent process is launched with `--no-extensions` (extension discovery disabled) and `--tools <allowlist>`; only the extensions backing the listed tools are loaded back in explicitly. There is no default toolset and no deny-list — an agent gets exactly what its frontmatter lists. The restriction survives resume via the loadout snapshot.
+Access is **whitelist-only**. Every restricted sub-agent process is launched with `--no-extensions` (extension discovery disabled) and `--tools <allowlist>`; only the extensions backing the listed tools are loaded back in explicitly. There is no default toolset and no deny-list — an agent gets exactly what its frontmatter lists. The restriction survives resume via the versioned loadout snapshot.
+
+For extension-backed tools, the launcher uses the canonical `sourceInfo.path` from `pi.getAllTools()` in the parent. This automatically supports npm/git Pi packages, global extensions, project extensions already trusted and loaded by the parent, renamed install directories, and one extension providing several tools. Built-in and SDK-inline pseudo-paths are never treated as loadable extension files. Unresolved or missing extension paths fail closed before launch instead of silently dropping tools or enabling global discovery.
 
 Spawns must name a known agent at **every** depth. A top-level session may spawn anything discoverable; a sub-agent may only spawn the agents in its `subagent_agents` list (enforced via `PI_SUBAGENT_ALLOWED`). There is no agentless spawn route, so a child can never escalate to a full-toolset profile by omitting its agent.
 
-Extensions can register additional tools for sub-agents at runtime via `registerToolExtension(name, path)` on the `__pi_interactive_subagents` process global.
+Child-only tools that are not present in the parent's tool inventory can use the compatibility hook `registerToolExtension(name, absolutePath)` on `globalThis.__pi_interactive_subagents`. The path must name an existing file. The original `~/.pi/agent/extensions/web-search`, `web-fetch`, and related pi-config locations remain deprecated fallbacks for compatibility.
 
 ## Role folders
 
-`cwd` starts a sub-agent in a directory with its own config, so role-specific setups (CLAUDE.md, skills, extensions) apply:
+`cwd` starts a sub-agent in a directory with its own config, so role-specific context and skills apply. Restricted agents still use `--no-extensions`; a role-specific extension tool must already be represented by parent provenance or the explicit compatibility registration hook:
 
 ```
 project/

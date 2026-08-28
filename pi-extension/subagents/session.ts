@@ -86,18 +86,23 @@ export function seedSubagentSessionFile(params: {
  *
  * Written next to the session file as `<sessionFile>.loadout.json` at spawn
  * time. Resume replays this exact snapshot so the reincarnated process gets the
- * same `--no-extensions` + `--tools` restriction, model, identity, spawn
- * whitelist, cwd, and config dir it originally ran with — instead of falling
- * back to pi's default (all global extensions + full toolset). Storing the
- * resolved loadout (rather than re-deriving from the agent `.md` by name) keeps
+ * same `--no-extensions` + `--tools` restriction, exact backing extension
+ * paths, model, identity, spawn whitelist, cwd, and config dir it originally
+ * ran with — instead of falling back to pi's default (all global extensions +
+ * full toolset). Storing the resolved loadout (rather than re-deriving from the
+ * agent `.md` by name) keeps
  * resume faithful even if the agent definition is later edited, moved, or
  * deleted.
  */
 export interface SubagentLoadout {
+  /** Snapshot schema. Version 2 pins backing extension paths for exact replay. */
+  version: 2;
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
   /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
   toolAllowlist: string | null;
+  /** Allowed extension-backed tool name → exact extension entry file. */
+  toolExtensions: Record<string, string>;
   /** Model id (without thinking suffix), or null to use the session default. */
   model: string | null;
   /** Thinking level appended to the model as `model:level`, or null. */
@@ -112,8 +117,8 @@ export interface SubagentLoadout {
   autoExit: boolean;
   /** Working directory the subagent ran in, or null. */
   cwd: string | null;
-  /** PI_CODING_AGENT_DIR the subagent resolved config/extensions from, or null. */
-  agentDir: string | null;
+  /** Exact PI_CODING_AGENT_DIR used by the original child process. */
+  agentDir: string;
 }
 
 /** Path of the loadout sidecar written next to a subagent session file. */
@@ -131,14 +136,51 @@ export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoado
   }
 }
 
-/** Read a subagent's loadout snapshot, or null if absent/unparseable. */
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isSubagentLoadout(value: unknown): value is SubagentLoadout {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const loadout = value as Record<string, unknown>;
+  const toolExtensions = loadout.toolExtensions;
+  if (!toolExtensions || typeof toolExtensions !== "object" || Array.isArray(toolExtensions)) {
+    return false;
+  }
+  if (!Object.values(toolExtensions).every((path) => typeof path === "string")) return false;
+  if (
+    loadout.version !== 2 ||
+    !isNullableString(loadout.agent) ||
+    !isNullableString(loadout.toolAllowlist) ||
+    !isNullableString(loadout.model) ||
+    !isNullableString(loadout.thinking) ||
+    !isNullableString(loadout.identity) ||
+    typeof loadout.autoExit !== "boolean" ||
+    !isNullableString(loadout.cwd) ||
+    typeof loadout.agentDir !== "string"
+  ) {
+    return false;
+  }
+  if (
+    loadout.systemPromptMode !== null &&
+    loadout.systemPromptMode !== "append" &&
+    loadout.systemPromptMode !== "replace"
+  ) {
+    return false;
+  }
+  return (
+    loadout.spawnable === null ||
+    (Array.isArray(loadout.spawnable) && loadout.spawnable.every((agent) => typeof agent === "string"))
+  );
+}
+
+/** Read a valid version-2 subagent loadout snapshot, or null. */
 export function readSubagentLoadout(sessionFile: string): SubagentLoadout | null {
   try {
     const p = loadoutSidecarPath(sessionFile);
     if (!existsSync(p)) return null;
-    const parsed = JSON.parse(readFileSync(p, "utf8"));
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed as SubagentLoadout;
+    const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
+    return isSubagentLoadout(parsed) ? parsed : null;
   } catch {
     return null;
   }

@@ -325,8 +325,14 @@ describe("session.ts", () => {
 
   describe("subagent loadout snapshot", () => {
     const sample: SubagentLoadout = {
+      version: 2,
       agent: "worker",
       toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,ask_question",
+      toolExtensions: {
+        safe_bash: "/extensions/safe-bash.ts",
+        web_search: "/extensions/web-search.ts",
+        subagent: "/extensions/subagents.ts",
+      },
       model: "openrouter/z-ai/glm-5.2",
       thinking: "medium",
       systemPromptMode: "append",
@@ -354,10 +360,18 @@ describe("session.ts", () => {
       assert.equal(readSubagentLoadout(join(dir, "missing.jsonl")), null);
     });
 
-    it("returns null when the sidecar is corrupt", () => {
-      const sf = join(dir, "s3.jsonl");
-      writeFileSync(sf + ".loadout.json", "not json{", "utf8");
-      assert.equal(readSubagentLoadout(sf), null);
+    it("returns null when the sidecar is corrupt or structurally invalid", () => {
+      const corrupt = join(dir, "s3.jsonl");
+      writeFileSync(corrupt + ".loadout.json", "not json{", "utf8");
+      assert.equal(readSubagentLoadout(corrupt), null);
+
+      const malformed = join(dir, "s4.jsonl");
+      writeFileSync(
+        malformed + ".loadout.json",
+        JSON.stringify({ version: 2, toolAllowlist: 42, toolExtensions: [] }),
+        "utf8",
+      );
+      assert.equal(readSubagentLoadout(malformed), null);
     });
   });
 
@@ -1206,13 +1220,75 @@ describe("subagent discovery", () => {
     }
   });
 
-  it("getToolExtensionPath maps custom tools and skips built-ins", () => {
-    assert.equal(testApi.getToolExtensionPath("read"), undefined);
-    assert.equal(testApi.getToolExtensionPath("bash"), undefined);
-    assert.ok(testApi.getToolExtensionPath("web_search")?.endsWith("web-search/index.ts"));
-    assert.ok(testApi.getToolExtensionPath("safe_bash")?.endsWith("tools/safe-bash.ts"));
-    // Spawning tools are registered by this extension itself.
-    assert.ok(testApi.getToolExtensionPath("subagent")?.endsWith("index.ts"));
+  it("resolves extension tools from canonical parent provenance", () => {
+    withTempDir((dir) => {
+      const provider = join(dir, "provider.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      const tools = [
+        { name: "read", sourceInfo: { path: "<builtin:read>", source: "builtin" } },
+        { name: "sdk_tool", sourceInfo: { path: "<sdk:sdk_tool>", source: "sdk" } },
+        { name: "web_search", sourceInfo: { path: provider, source: "npm:pi-web-access" } },
+      ];
+
+      assert.equal(testApi.getToolExtensionPath("read", tools), undefined);
+      assert.equal(testApi.getToolExtensionPath("sdk_tool", tools), undefined);
+      assert.equal(testApi.getToolExtensionPath("web_search", tools), provider);
+      assert.ok(testApi.getToolExtensionPath("safe_bash", tools)?.endsWith("tools/safe-bash.ts"));
+      assert.ok(testApi.getToolExtensionPath("subagent", tools)?.endsWith("index.ts"));
+    });
+  });
+
+  it("builds a manifest, deduplicates at launch, and reports unresolved tools", () => {
+    withTempDir((dir) => {
+      const provider = join(dir, "provider.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      const tools = [
+        { name: "web_search", sourceInfo: { path: provider, source: "npm:pi-web-access" } },
+        { name: "fetch_content", sourceInfo: { path: provider, source: "npm:pi-web-access" } },
+      ];
+      const resolution = testApi.resolveToolExtensionManifest(
+        "read,web_search,fetch_content,missing_tool,ask_question",
+        tools,
+      );
+
+      assert.deepEqual(resolution.toolExtensions, {
+        web_search: provider,
+        fetch_content: provider,
+      });
+      assert.deepEqual(resolution.unresolved, ["missing_tool"]);
+    });
+  });
+
+  it("supports explicit registration as a child-only tool fallback", () => {
+    withTempDir((dir) => {
+      const provider = join(dir, "child-only.ts");
+      const conflictingProvider = join(dir, "conflicting.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      writeFileSync(conflictingProvider, "export default () => {};", "utf8");
+      const toolName = `child_only_${Date.now()}_${Math.random()}`;
+      subagentsModule.registerToolExtension(toolName, provider);
+      subagentsModule.registerToolExtension(toolName, provider);
+      assert.equal(testApi.getToolExtensionPath(toolName, []), provider);
+      assert.equal(
+        testApi.getToolExtensionPath(toolName, [
+          { name: toolName, sourceInfo: { path: "<sdk:child-only>", source: "sdk" } },
+        ]),
+        undefined,
+        "known but unloadable parent provenance must not fall back to a different provider",
+      );
+      assert.throws(
+        () => subagentsModule.registerToolExtension(toolName, conflictingProvider),
+        /already registered/,
+      );
+      assert.throws(
+        () => subagentsModule.registerToolExtension(`missing_${toolName}`, join(dir, "missing.ts")),
+        /absolute existing file/,
+      );
+      assert.throws(
+        () => subagentsModule.registerToolExtension("read", provider),
+        /shadows a built-in/,
+      );
+    });
   });
 
   it("ignores invalid session-mode values", async () => {
@@ -1290,8 +1366,14 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
+          version: 2,
           agent: "worker",
           toolAllowlist: "read,write,safe_bash",
+          toolExtensions: {
+            safe_bash: fileURLToPath(
+              new URL("../pi-extension/subagents/tools/safe-bash.ts", import.meta.url),
+            ),
+          },
           model: "openrouter/z-ai/glm-5.2",
           thinking: "medium",
           systemPromptMode: "append",
@@ -1299,7 +1381,7 @@ describe("subagent discovery", () => {
           spawnable: ["scout"],
           autoExit: true,
           cwd: null,
-          agentDir: null,
+          agentDir: join(d, "agent"),
         },
         { artifactDir: d, name: "worker" },
       );
@@ -1321,14 +1403,97 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("applySandboxToParts uses only pinned paths and deduplicates shared providers", () => {
+    withTempDir((d) => {
+      const pinnedProvider = join(d, "pinned-provider.ts");
+      const currentProvider = join(d, "current-provider.ts");
+      writeFileSync(pinnedProvider, "export default () => {};", "utf8");
+      writeFileSync(currentProvider, "export default () => {};", "utf8");
+      const parts: string[] = [];
+
+      testApi.applySandboxToParts(
+        parts,
+        {
+          version: 2,
+          agent: "researcher",
+          toolAllowlist: "web_search,fetch_content,ask_question",
+          toolExtensions: {
+            web_search: pinnedProvider,
+            fetch_content: pinnedProvider,
+          },
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: join(d, "agent"),
+        },
+        { artifactDir: d, name: "researcher" },
+      );
+
+      const extensionArgs = parts.filter((part, index) => parts[index - 1] === "-e");
+      assert.deepEqual(extensionArgs, [`'${pinnedProvider}'`]);
+      assert.ok(!parts.join(" ").includes(currentProvider));
+    });
+  });
+
+  it("refuses stale or incomplete extension snapshots", () => {
+    withTempDir((d) => {
+      const malformedSnapshot = {
+        version: 2,
+        toolAllowlist: 42,
+      } as unknown as SubagentLoadout;
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot(malformedSnapshot),
+        /malformed tool allowlist/,
+      );
+
+      const oldSnapshot = {
+        agent: "researcher",
+        toolAllowlist: "web_search,ask_question",
+      } as SubagentLoadout;
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot(oldSnapshot),
+        /predates extension-manifest pinning/,
+      );
+
+      const missingSnapshot: SubagentLoadout = {
+        version: 2,
+        agent: "researcher",
+        toolAllowlist: "web_search,ask_question",
+        toolExtensions: { web_search: join(d, "removed-provider.ts") },
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: null,
+        agentDir: join(d, "agent"),
+      };
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot(missingSnapshot),
+        /no longer exists/,
+      );
+      assert.throws(
+        () => testApi.applySandboxToParts([], missingSnapshot, { artifactDir: d, name: "researcher" }),
+        /Cannot safely apply subagent sandbox/,
+      );
+    });
+  });
+
   it("applySandboxToParts omits restriction flags when the loadout was unrestricted", () => {
     withTempDir((d) => {
       const parts: string[] = [];
       testApi.applySandboxToParts(
         parts,
         {
+          version: 2,
           agent: null,
           toolAllowlist: null,
+          toolExtensions: {},
           model: null,
           thinking: null,
           systemPromptMode: null,
@@ -1336,7 +1501,7 @@ describe("subagent discovery", () => {
           spawnable: null,
           autoExit: false,
           cwd: null,
-          agentDir: null,
+          agentDir: join(d, "agent"),
         },
         { artifactDir: d, name: "fork" },
       );
@@ -1823,6 +1988,12 @@ describe("tool registration", () => {
     });
   });
 
+  it("persists resumable names only for Pi-backed sessions", () => {
+    const testApi = (subagentsModule as any).__test__;
+    assert.equal(testApi.hasResumablePiSession({}), true);
+    assert.equal(testApi.hasResumablePiSession({ cli: "pi" }), true);
+    assert.equal(testApi.hasResumablePiSession({ cli: "claude" }), false);
+  });
 
   it("rejects a top-level spawn with no agent and no fork", async () => {
     const { api, registeredTools } = createMockExtensionApi();

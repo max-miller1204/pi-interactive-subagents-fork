@@ -1,0 +1,68 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { __test__ as subagentTestApi } from "../../pi-extension/subagents/index.ts";
+import { shellEscape } from "../../pi-extension/subagents/tmux.ts";
+import type { SubagentLoadout } from "../../pi-extension/subagents/session.ts";
+
+const fixtureProvider = fileURLToPath(new URL("./fixtures/tool-provider.ts", import.meta.url));
+
+describe("restricted tool-extension sandbox", () => {
+  it("loads only pinned extensions and activates only allowlisted tools", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-tool-sandbox-"));
+    try {
+      const agentDir = join(dir, "agent");
+      const blockedMarker = join(dir, "blocked-extension-loaded");
+      const blockedExtension = join(agentDir, "extensions", "blocked.ts");
+      mkdirSync(dirname(blockedExtension), { recursive: true });
+      writeFileSync(
+        blockedExtension,
+        [
+          'import { writeFileSync } from "node:fs";',
+          `writeFileSync(${JSON.stringify(blockedMarker)}, "loaded", "utf8");`,
+          "export default function () {}",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const loadout: SubagentLoadout = {
+        version: 2,
+        agent: "integration",
+        toolAllowlist: "allowed_tool",
+        toolExtensions: { allowed_tool: fixtureProvider },
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: dir,
+        agentDir,
+      };
+      const parts = ["pi", "--print", "--offline", "--no-session"];
+      subagentTestApi.applySandboxToParts(parts, loadout, {
+        artifactDir: dir,
+        name: "integration",
+      });
+      parts.push(shellEscape("inspect"));
+
+      const result = spawnSync("sh", ["-lc", parts.join(" ")], {
+        cwd: dir,
+        env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+
+      assert.equal(result.status, 0, `pi failed:\n${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, /SANDBOX_ACTIVE=allowed_tool(?:\r?\n|$)/);
+      assert.doesNotMatch(result.stdout, /other_tool/);
+      assert.equal(existsSync(blockedMarker), false, "global extension discovery must stay disabled");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
