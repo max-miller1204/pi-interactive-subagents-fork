@@ -261,22 +261,15 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
   registerModelProviderExtension,
 };
 
-function resolveModelProviderExtension(model: string | undefined, modelRegistry: unknown): string | null {
+function resolveModelProviderExtension(model: string | undefined): string | null {
   const separator = model?.indexOf("/") ?? -1;
-  if (!model || separator <= 0) {
-    throw new Error(`Cannot pin model provider ownership for non-canonical model "${model ?? ""}"`);
-  }
+  if (!model || separator <= 0) return null;
   const provider = model.slice(0, separator);
-  const registrations = (modelRegistry as { registeredProviders?: unknown })?.registeredProviders;
-  if (!(registrations instanceof Map)) {
-    throw new Error(`Cannot inspect runtime provider ownership for model provider "${provider}"`);
-  }
-  if (!registrations.has(provider)) return null;
   const extensionPath = MODEL_PROVIDER_EXTENSIONS.get(provider);
+  if (extensionPath === undefined) return null;
   if (!isLoadableExtensionPath(extensionPath)) {
     throw new Error(
-      `Cannot pin runtime model provider "${provider}" to a loadable extension; ` +
-        `register it with registerModelProviderExtension(provider, import.meta.filename)`,
+      `Cannot pin registered model provider "${provider}" because its extension is no longer loadable: ${extensionPath}`,
     );
   }
   return extensionPath;
@@ -1383,7 +1376,6 @@ async function launchSubagent(
     sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
     cwd: string;
     model: { provider: string; id: string } | undefined;
-    modelRegistry: unknown;
   },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
@@ -1394,7 +1386,7 @@ async function launchSubagent(
   const cli = agentDefs?.cli === "claude" ? "claude" : "pi";
   const effectiveModel = resolveCliLaunchModel(cli, params.model, agentDefs?.model, ctx.model);
   const modelProviderExtension =
-    cli === "pi" ? resolveModelProviderExtension(effectiveModel, ctx.modelRegistry) : null;
+    cli === "pi" ? resolveModelProviderExtension(effectiveModel) : null;
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;

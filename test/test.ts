@@ -1314,29 +1314,25 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("pins runtime model providers only through loadable registered extensions", () => {
+  it("pins explicitly registered model providers across runtime versions", () => {
     withTempDir((dir) => {
       const providerName = `corporate_${Date.now()}_${Math.random()}`;
       const provider = join(dir, "corporate-provider.ts");
       writeFileSync(provider, "export default () => {};", "utf8");
-      const builtInRegistry = { registeredProviders: new Map() };
       assert.equal(
-        testApi.resolveModelProviderExtension(`${providerName}/model`, builtInRegistry),
+        testApi.resolveModelProviderExtension(`${providerName}/model`),
         null,
       );
-      assert.throws(
-        () => testApi.resolveModelProviderExtension(`${providerName}/model`, {}),
-        /Cannot inspect runtime provider ownership/,
-      );
-      const runtimeRegistry = { registeredProviders: new Map([[providerName, {}]]) };
-      assert.throws(
-        () => testApi.resolveModelProviderExtension(`${providerName}/model`, runtimeRegistry),
-        /Cannot pin runtime model provider/,
-      );
+      assert.equal(testApi.resolveModelProviderExtension("bare-built-in-model"), null);
       subagentsModule.registerModelProviderExtension(providerName, provider);
       assert.equal(
-        testApi.resolveModelProviderExtension(`${providerName}/model`, runtimeRegistry),
+        testApi.resolveModelProviderExtension(`${providerName}/model`),
         provider,
+      );
+      rmSync(provider);
+      assert.throws(
+        () => testApi.resolveModelProviderExtension(`${providerName}/model`),
+        /extension is no longer loadable/,
       );
     });
   });
