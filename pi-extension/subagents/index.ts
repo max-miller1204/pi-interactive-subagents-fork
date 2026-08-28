@@ -223,7 +223,7 @@ export function registerToolExtension(name: string, extensionPath: string): void
   }
   const existing = EXTRA_TOOL_EXTENSIONS.get(name);
   if (existing === extensionPath) return;
-  if (existing !== undefined) {
+  if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );

@@ -1317,6 +1317,9 @@ describe("subagent discovery", () => {
         () => subagentsModule.registerToolExtension(toolName, conflictingProvider),
         /already registered/,
       );
+      rmSync(provider);
+      subagentsModule.registerToolExtension(toolName, conflictingProvider);
+      assert.equal(testApi.getToolExtensionPath(toolName, []), conflictingProvider);
       assert.throws(
         () => subagentsModule.registerToolExtension(`missing_${toolName}`, join(dir, "missing.ts")),
         /absolute existing file/,
