@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { keyHint } from "@mariozechner/pi-coding-agent";
-import { getModel, type Model } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -263,47 +262,24 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
   registerModelProviderExtension,
 };
 
-function modelReplaySignature(model: Model<any>): string {
-  return JSON.stringify({
-    provider: model.provider,
-    id: model.id,
-    name: model.name,
-    api: model.api,
-    baseUrl: model.baseUrl,
-    reasoning: model.reasoning,
-    input: model.input,
-    cost: model.cost,
-    contextWindow: model.contextWindow,
-    maxTokens: model.maxTokens,
-    headers: model.headers,
-    compat: model.compat,
-  });
-}
+type PiModel = NonNullable<ExtensionContext["model"]>;
 
-function resolveModelProviderExtension(model: Model<any>): string | null {
+function resolveModelProviderExtension(model: PiModel): string | null {
   const provider = model.provider;
   const extensionPath = MODEL_PROVIDER_EXTENSIONS.get(provider);
-  if (extensionPath !== undefined) {
-    if (!isLoadableExtensionPath(extensionPath)) {
-      throw new Error(
-        `Cannot pin registered model provider "${provider}" because its extension is no longer loadable: ${extensionPath}`,
-      );
-    }
-    return extensionPath;
+  if (extensionPath === undefined) return null;
+  if (!isLoadableExtensionPath(extensionPath)) {
+    throw new Error(
+      `Cannot pin registered model provider "${provider}" because its extension is no longer loadable: ${extensionPath}`,
+    );
   }
-
-  const builtInModel = getModel(provider as any, model.id as any) as Model<any> | undefined;
-  if (builtInModel && modelReplaySignature(model) === modelReplaySignature(builtInModel)) return null;
-  throw new Error(
-    `Model provider "${provider}" is custom or overrides Pi's built-in model metadata, ` +
-      `but no loadable backing extension was registered with registerModelProviderExtension`,
-  );
+  return extensionPath;
 }
 
 function resolveRuntimeModel(
   modelReference: string | undefined,
-  modelRegistry: { find(provider: string, modelId: string): Model<any> | undefined; getAll(): Model<any>[] },
-): Model<any> {
+  modelRegistry: { find(provider: string, modelId: string): PiModel | undefined; getAll(): PiModel[] },
+): PiModel {
   if (!modelReference) throw new Error("Cannot resolve an empty Pi model reference");
   const separator = modelReference.indexOf("/");
   if (separator > 0) {
@@ -1434,8 +1410,8 @@ async function launchSubagent(
     cwd: string;
     model: { provider: string; id: string } | undefined;
     modelRegistry: {
-      find(provider: string, modelId: string): Model<any> | undefined;
-      getAll(): Model<any>[];
+      find(provider: string, modelId: string): PiModel | undefined;
+      getAll(): PiModel[];
     };
   },
   options?: { surface?: string },
@@ -1963,6 +1939,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       agent.abortController?.abort();
     }
     runningSubagents.clear();
+    EXTRA_TOOL_EXTENSIONS.clear();
+    MODEL_PROVIDER_EXTENSIONS.clear();
   });
 
   // The spawning tools are always registered here. Whether a child process can

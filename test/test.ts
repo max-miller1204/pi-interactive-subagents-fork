@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { getModel } from "@mariozechner/pi-ai";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -87,14 +86,20 @@ function createMockExtensionApi() {
   const registeredMessageRenderers: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
+  const eventHandlers = new Map<string, Array<(...args: any[]) => any>>();
   return {
     registeredTools,
     registeredCommands,
     registeredMessageRenderers,
     sentUserMessages,
     sentMessages,
+    eventHandlers,
     api: {
-      on() {},
+      on(name: string, handler: (...args: any[]) => any) {
+        const handlers = eventHandlers.get(name) ?? [];
+        handlers.push(handler);
+        eventHandlers.set(name, handlers);
+      },
       registerTool(tool: any) {
         registeredTools.push(tool);
       },
@@ -1334,22 +1339,21 @@ describe("subagent discovery", () => {
       const providerName = `corporate_${Date.now()}_${Math.random()}`;
       const provider = join(dir, "corporate-provider.ts");
       writeFileSync(provider, "export default () => {};", "utf8");
-      const builtIn = getModel("anthropic", "claude-sonnet-4-5");
-      assert.equal(testApi.resolveModelProviderExtension(builtIn), null);
+      const configuredModel = {
+        provider: "anthropic",
+        id: "claude-sonnet-4-5",
+        baseUrl: "https://configured.example/v1",
+      } as any;
+      assert.equal(testApi.resolveModelProviderExtension(configuredModel), null);
       assert.equal(
         testApi.resolveModelProviderExtension({
-          ...builtIn,
+          ...configuredModel,
           externalRequestConfig: { headers: { "x-routing": "mutable" } },
         } as any),
         null,
       );
-      const overridden = { ...builtIn, baseUrl: "https://corporate.example/v1" };
-      assert.throws(
-        () => testApi.resolveModelProviderExtension(overridden),
-        /custom or overrides Pi's built-in model metadata/,
-      );
       subagentsModule.registerModelProviderExtension(providerName, provider);
-      const custom = { ...builtIn, provider: providerName, id: "model" };
+      const custom = { ...configuredModel, provider: providerName, id: "model" };
       assert.equal(
         testApi.resolveModelProviderExtension(custom),
         provider,
@@ -1359,6 +1363,43 @@ describe("subagent discovery", () => {
         () => testApi.resolveModelProviderExtension(custom),
         /extension is no longer loadable/,
       );
+    });
+  });
+
+  it("clears compatibility registrations on shutdown and permits renewal", () => {
+    withTempDir((dir) => {
+      const toolName = `reload_tool_${Date.now()}_${Math.random()}`;
+      const providerName = `reload_provider_${Date.now()}_${Math.random()}`;
+      const toolBefore = join(dir, "tool-before.ts");
+      const toolAfter = join(dir, "tool-after.ts");
+      const providerBefore = join(dir, "provider-before.ts");
+      const providerAfter = join(dir, "provider-after.ts");
+      for (const path of [toolBefore, toolAfter, providerBefore, providerAfter]) {
+        writeFileSync(path, "export default () => {};", "utf8");
+      }
+
+      const { api, eventHandlers } = createMockExtensionApi();
+      subagentsModule.default(api as any);
+      subagentsModule.registerToolExtension(toolName, toolBefore);
+      subagentsModule.registerModelProviderExtension(providerName, providerBefore);
+      const model = { provider: providerName, id: "model" } as any;
+      assert.equal(testApi.getToolExtensionPath(toolName, []), toolBefore);
+      assert.equal(testApi.resolveModelProviderExtension(model), providerBefore);
+
+      const shutdown = eventHandlers.get("session_shutdown")?.[0];
+      assert.ok(shutdown);
+      shutdown({}, {});
+      assert.equal(testApi.getToolExtensionPath(toolName, []), undefined);
+      assert.equal(testApi.resolveModelProviderExtension(model), null);
+
+      subagentsModule.registerToolExtension(toolName, toolAfter);
+      subagentsModule.registerModelProviderExtension(providerName, providerAfter);
+      assert.equal(testApi.getToolExtensionPath(toolName, []), toolAfter);
+      assert.equal(testApi.resolveModelProviderExtension(model), providerAfter);
+
+      const start = eventHandlers.get("session_start")?.[0];
+      assert.ok(start);
+      start({}, {});
     });
   });
 
