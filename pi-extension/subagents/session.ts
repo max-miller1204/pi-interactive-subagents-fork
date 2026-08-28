@@ -99,8 +99,8 @@ export interface SubagentLoadout {
   version: 2;
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
-  /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
-  toolAllowlist: string | null;
+  /** Exact non-empty `--tools` allowlist used by the child. */
+  toolAllowlist: string;
   /** Allowed extension-backed tool name → exact extension entry file. */
   toolExtensions: Record<string, string>;
   /** Exact model id (without thinking suffix) used by the child. */
@@ -157,7 +157,8 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   if (
     loadout.version !== 2 ||
     !isNullableString(loadout.agent) ||
-    !isNullableString(loadout.toolAllowlist) ||
+    typeof loadout.toolAllowlist !== "string" ||
+    loadout.toolAllowlist.split(",").every((tool) => tool.trim().length === 0) ||
     typeof loadout.model !== "string" ||
     loadout.model.trim().length === 0 ||
     !isNullableString(loadout.thinking) ||

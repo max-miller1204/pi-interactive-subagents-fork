@@ -113,6 +113,9 @@ function createMockExtensionApi() {
       getAllTools() {
         return [];
       },
+      getActiveTools() {
+        return ["read", "write", "edit", "bash"];
+      },
     } as any,
   };
 }
@@ -385,6 +388,8 @@ describe("session.ts", () => {
         { agentDir: "relative/agent" },
         { model: null },
         { model: "" },
+        { toolAllowlist: null },
+        { toolAllowlist: "" },
       ]) {
         const sessionFile = join(dir, `invalid-${Math.random()}.jsonl`);
         writeFileSync(sessionFile + ".loadout.json", JSON.stringify({ ...sample, ...patch }), "utf8");
@@ -1392,6 +1397,22 @@ describe("subagent discovery", () => {
     assert.equal(testApi.buildSubagentToolAllowlist(""), null);
   });
 
+  it("snapshots active default tools without granting nested spawning", () => {
+    assert.equal(
+      testApi.buildSubagentToolAllowlist(undefined, {
+        defaultTools: ["read", "write", "web_search", "subagent", "subagent_message"],
+      }),
+      "read,write,web_search,ask_question",
+    );
+  });
+
+  it("rejects explicitly requested spawning tools without a whitelist", () => {
+    assert.throws(
+      () => testApi.buildSubagentToolAllowlist("read,subagent"),
+      /require a non-empty subagent_agents whitelist/,
+    );
+  });
+
   it("pins the active parent model when no override is configured", () => {
     assert.equal(
       testApi.resolveLaunchModel(undefined, undefined, {
@@ -1410,6 +1431,22 @@ describe("subagent discovery", () => {
     assert.throws(
       () => testApi.resolveLaunchModel(undefined, undefined, undefined),
       /without an active parent model/,
+    );
+  });
+
+  it("does not pass the active Pi model to Claude CLI", () => {
+    const activeModel = { provider: "openrouter", id: "z-ai/glm-5.3" };
+    assert.equal(
+      testApi.resolveCliLaunchModel("claude", undefined, undefined, activeModel),
+      undefined,
+    );
+    assert.equal(
+      testApi.resolveCliLaunchModel("claude", "sonnet", undefined, activeModel),
+      "sonnet",
+    );
+    assert.equal(
+      testApi.resolveCliLaunchModel("pi", undefined, undefined, activeModel),
+      "openrouter/z-ai/glm-5.3",
     );
   });
 
@@ -1547,7 +1584,7 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("applySandboxToParts omits restriction flags when the loadout was unrestricted", () => {
+  it("applySandboxToParts replays a snapshotted default toolset", () => {
     withTempDir((d) => {
       const parts: string[] = [];
       testApi.applySandboxToParts(
@@ -1555,7 +1592,7 @@ describe("subagent discovery", () => {
         {
           version: 2,
           agent: null,
-          toolAllowlist: null,
+          toolAllowlist: "read,write,ask_question",
           toolExtensions: {},
           model: "openrouter/test-model",
           thinking: null,
@@ -1568,7 +1605,13 @@ describe("subagent discovery", () => {
         },
         { artifactDir: d, name: "fork" },
       );
-      assert.deepEqual(parts, ["--model", "'openrouter/test-model'"]);
+      assert.deepEqual(parts, [
+        "--model",
+        "'openrouter/test-model'",
+        "--no-extensions",
+        "--tools",
+        "'read,write,ask_question'",
+      ]);
     });
   });
 

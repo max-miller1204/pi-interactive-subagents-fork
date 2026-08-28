@@ -446,6 +446,20 @@ function resolveLaunchModel(
   return `${activeModel.provider}/${activeModel.id}`;
 }
 
+function resolveCliLaunchModel(
+  cli: "pi" | "claude",
+  requestedModel: string | undefined,
+  agentModel: string | undefined,
+  activeModel: { provider: string; id: string } | undefined,
+): string | undefined {
+  if (cli === "pi") return resolveLaunchModel(requestedModel, agentModel, activeModel);
+  const configuredModel = requestedModel ?? agentModel;
+  if (configuredModel !== undefined && configuredModel.trim().length === 0) {
+    throw new Error("Subagent model must not be empty");
+  }
+  return configuredModel;
+}
+
 function resolveLaunchBehavior(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
@@ -883,7 +897,7 @@ const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
  */
 function buildSubagentToolAllowlist(
   effectiveTools?: string,
-  opts?: { grantSpawning?: boolean },
+  opts?: { grantSpawning?: boolean; defaultTools?: readonly string[] },
 ): string | null {
   const requested = (effectiveTools ?? "")
     .split(",")
@@ -891,12 +905,21 @@ function buildSubagentToolAllowlist(
     .filter(Boolean);
 
   const grantSpawning = opts?.grantSpawning ?? false;
+  const requestedSpawning = requested.filter((tool) =>
+    (SPAWNING_TOOLS as readonly string[]).includes(tool),
+  );
+  if (requestedSpawning.length > 0 && !grantSpawning) {
+    throw new Error(
+      `Spawning tool(s) ${requestedSpawning.join(", ")} require a non-empty subagent_agents whitelist`,
+    );
+  }
 
-  // No explicit tool restriction and no spawning grant → don't pass --tools at
-  // all (the child keeps its default toolset).
-  if (requested.length === 0 && !grantSpawning) return null;
+  if (requested.length === 0 && opts?.defaultTools === undefined && !grantSpawning) return null;
 
-  const allow = new Set(requested);
+  const allow = new Set(requested.length > 0 ? requested : opts?.defaultTools ?? []);
+  if (!grantSpawning) {
+    for (const tool of SPAWNING_TOOLS) allow.delete(tool);
+  }
   if (grantSpawning) {
     for (const tool of SPAWNING_TOOLS) allow.add(tool);
   }
@@ -919,10 +942,9 @@ function buildSubagentToolAllowlist(
  * responsibility since they differ slightly between launch and resume.
  */
 function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | null {
-  if (loadout.toolAllowlist !== null && typeof loadout.toolAllowlist !== "string") {
+  if (typeof loadout.toolAllowlist !== "string" || !loadout.toolAllowlist.trim()) {
     return "sandbox snapshot has a malformed tool allowlist";
   }
-  if (!loadout.toolAllowlist) return null;
   if (
     loadout.version !== 2 ||
     !loadout.toolExtensions ||
@@ -987,17 +1009,15 @@ function applySandboxToParts(
 
   // Default-deny: disable discovery and replay only the extension paths pinned
   // at initial spawn. Never re-resolve against the current parent on resume.
-  if (loadout.toolAllowlist) {
-    const snapshotError = validateSandboxExtensionSnapshot(loadout);
-    if (snapshotError) throw new Error(`Cannot safely apply subagent sandbox: ${snapshotError}.`);
+  const snapshotError = validateSandboxExtensionSnapshot(loadout);
+  if (snapshotError) throw new Error(`Cannot safely apply subagent sandbox: ${snapshotError}.`);
 
-    parts.push("--no-extensions");
-    parts.push("--tools", shellEscape(loadout.toolAllowlist));
+  parts.push("--no-extensions");
+  parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
-    const extPaths = new Set(Object.values(loadout.toolExtensions));
-    for (const extPath of extPaths) {
-      parts.push("-e", shellEscape(extPath));
-    }
+  const extPaths = new Set(Object.values(loadout.toolExtensions));
+  for (const extPath of extPaths) {
+    parts.push("-e", shellEscape(extPath));
   }
 }
 
@@ -1253,6 +1273,7 @@ export const __test__ = {
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
   resolveLaunchModel,
+  resolveCliLaunchModel,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
@@ -1308,16 +1329,25 @@ async function launchSubagent(
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = resolveLaunchModel(params.model, agentDefs?.model, ctx.model);
+  const cli = agentDefs?.cli === "claude" ? "claude" : "pi";
+  const effectiveModel = resolveCliLaunchModel(cli, params.model, agentDefs?.model, ctx.model);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
-  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, { grantSpawning });
+  const defaultTools =
+    cli === "pi" && effectiveTools === undefined ? latestPi?.getActiveTools() : undefined;
+  if (cli === "pi" && effectiveTools === undefined && defaultTools === undefined) {
+    throw new Error("Cannot launch subagent without snapshotting the active parent tools");
+  }
+  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, {
+    grantSpawning,
+    defaultTools,
+  });
   let toolExtensions: Record<string, string> = {};
 
-  if (toolAllowlist && agentDefs?.cli !== "claude") {
+  if (toolAllowlist && cli === "pi") {
     const resolution = resolveToolExtensionManifest(toolAllowlist);
     if (resolution.unresolved.length > 0) {
       throw new Error(
@@ -1392,7 +1422,7 @@ async function launchSubagent(
     ? params.task
     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
   // ── Claude Code CLI path ──
-  if (agentDefs?.cli === "claude") {
+  if (cli === "claude") {
     const sentinelFile = `/tmp/pi-claude-${id}-done`;
     const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
@@ -1458,6 +1488,10 @@ async function launchSubagent(
 
     runningSubagents.set(id, running);
     return running;
+  }
+
+  if (!effectiveModel || !toolAllowlist) {
+    throw new Error("Cannot launch subagent without an exact model and tool snapshot");
   }
 
   // ── Pi CLI path ──

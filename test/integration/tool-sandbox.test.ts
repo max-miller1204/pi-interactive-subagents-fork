@@ -34,7 +34,7 @@ describe("restricted tool-extension sandbox", () => {
         agent: "integration",
         toolAllowlist: "allowed_tool",
         toolExtensions: { allowed_tool: fixtureProvider },
-        model: null,
+        model: "anthropic/claude-sonnet-4-5",
         thinking: null,
         systemPromptMode: null,
         identity: null,
