@@ -198,6 +198,12 @@ const TOOL_EXTENSION_REGISTRY_KEY = Symbol.for("pi-interactive-subagents/tool-ex
 const EXTRA_TOOL_EXTENSIONS: Map<string, string> =
   (globalThis as any)[TOOL_EXTENSION_REGISTRY_KEY] ?? new Map<string, string>();
 (globalThis as any)[TOOL_EXTENSION_REGISTRY_KEY] = EXTRA_TOOL_EXTENSIONS;
+const MODEL_PROVIDER_EXTENSION_REGISTRY_KEY = Symbol.for(
+  "pi-interactive-subagents/model-provider-extensions",
+);
+const MODEL_PROVIDER_EXTENSIONS: Map<string, string> =
+  (globalThis as any)[MODEL_PROVIDER_EXTENSION_REGISTRY_KEY] ?? new Map<string, string>();
+(globalThis as any)[MODEL_PROVIDER_EXTENSION_REGISTRY_KEY] = MODEL_PROVIDER_EXTENSIONS;
 
 function isLoadableExtensionPath(extensionPath: unknown): extensionPath is string {
   if (typeof extensionPath !== "string" || !isAbsolute(extensionPath) || !existsSync(extensionPath)) {
@@ -231,11 +237,50 @@ export function registerToolExtension(name: string, extensionPath: string): void
   EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
 }
 
+export function registerModelProviderExtension(provider: string, extensionPath: string): void {
+  if (!provider.trim()) throw new Error("Model provider name must not be empty");
+  if (!isLoadableExtensionPath(extensionPath)) {
+    throw new Error(
+      `Model provider extension path for "${provider}" must be an absolute existing file: ${extensionPath}`,
+    );
+  }
+  const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
+  if (existing === extensionPath) return;
+  if (existing !== undefined && isLoadableExtensionPath(existing)) {
+    throw new Error(
+      `Model provider extension already registered for "${provider}": ${existing} (refusing to overwrite with ${extensionPath})`,
+    );
+  }
+  MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
+}
+
 // Compatibility hook for extensions that explicitly register child-only tools.
 (globalThis as any).__pi_interactive_subagents = {
   ...(globalThis as any).__pi_interactive_subagents,
   registerToolExtension,
+  registerModelProviderExtension,
 };
+
+function resolveModelProviderExtension(model: string | undefined, modelRegistry: unknown): string | null {
+  const separator = model?.indexOf("/") ?? -1;
+  if (!model || separator <= 0) {
+    throw new Error(`Cannot pin model provider ownership for non-canonical model "${model ?? ""}"`);
+  }
+  const provider = model.slice(0, separator);
+  const registrations = (modelRegistry as { registeredProviders?: unknown })?.registeredProviders;
+  if (!(registrations instanceof Map)) {
+    throw new Error(`Cannot inspect runtime provider ownership for model provider "${provider}"`);
+  }
+  if (!registrations.has(provider)) return null;
+  const extensionPath = MODEL_PROVIDER_EXTENSIONS.get(provider);
+  if (!isLoadableExtensionPath(extensionPath)) {
+    throw new Error(
+      `Cannot pin runtime model provider "${provider}" to a loadable extension; ` +
+        `register it with registerModelProviderExtension(provider, import.meta.filename)`,
+    );
+  }
+  return extensionPath;
+}
 
 /**
  * Resolve a custom tool to the extension file that registered it in the parent.
@@ -293,7 +338,7 @@ function resolveToolExtensionManifest(
   toolAllowlist: string,
   availableTools: readonly ToolSourceMetadata[] = latestPi?.getAllTools() ?? [],
 ): ToolExtensionResolution {
-  const toolExtensions: Record<string, string> = {};
+  const toolExtensions: Record<string, string> = Object.create(null);
   const unresolved: string[] = [];
 
   for (const tool of toolAllowlist.split(",").map((name) => name.trim()).filter(Boolean)) {
@@ -969,7 +1014,7 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
       .filter((tool) => tool && !BUILTIN_TOOLS.has(tool) && tool !== "ask_question"),
   );
   for (const tool of requiredTools) {
-    if (!loadout.toolExtensions[tool]) {
+    if (!Object.hasOwn(loadout.toolExtensions, tool)) {
       return `sandbox snapshot has no backing extension for "${tool}"`;
     }
   }
@@ -985,6 +1030,11 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
     }
     if (!isLoadableExtensionPath(extensionPath)) {
       return `snapshotted extension for "${tool}" no longer exists as a file: ${extensionPath}`;
+    }
+  }
+  if (loadout.modelProviderExtension !== null) {
+    if (!isLoadableExtensionPath(loadout.modelProviderExtension)) {
+      return `snapshotted model provider extension no longer exists as a file: ${loadout.modelProviderExtension}`;
     }
   }
   return null;
@@ -1024,6 +1074,7 @@ function applySandboxToParts(
   parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
   const extPaths = new Set(Object.values(loadout.toolExtensions));
+  if (loadout.modelProviderExtension) extPaths.add(loadout.modelProviderExtension);
   for (const extPath of extPaths) {
     parts.push("-e", shellEscape(extPath));
   }
@@ -1283,6 +1334,7 @@ export const __test__ = {
   resolveEffectiveSessionMode,
   resolveLaunchModel,
   resolveCliLaunchModel,
+  resolveModelProviderExtension,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
@@ -1331,6 +1383,7 @@ async function launchSubagent(
     sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
     cwd: string;
     model: { provider: string; id: string } | undefined;
+    modelRegistry: unknown;
   },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
@@ -1340,6 +1393,8 @@ async function launchSubagent(
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
   const cli = agentDefs?.cli === "claude" ? "claude" : "pi";
   const effectiveModel = resolveCliLaunchModel(cli, params.model, agentDefs?.model, ctx.model);
+  const modelProviderExtension =
+    cli === "pi" ? resolveModelProviderExtension(effectiveModel, ctx.modelRegistry) : null;
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1521,6 +1576,7 @@ async function launchSubagent(
     toolAllowlist,
     toolExtensions,
     model: effectiveModel,
+    modelProviderExtension,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
     identity: identityInSystemPrompt ? identity : null,

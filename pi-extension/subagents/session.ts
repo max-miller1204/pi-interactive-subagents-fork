@@ -105,6 +105,7 @@ export interface SubagentLoadout {
   toolExtensions: Record<string, string>;
   /** Exact model id (without thinking suffix) used by the child. */
   model: string;
+  modelProviderExtension: string | null;
   /** Thinking level appended to the model as `model:level`, or null. */
   thinking: string | null;
   /** How the identity text was applied: append/replace, or null. */
@@ -161,6 +162,8 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     loadout.toolAllowlist.split(",").every((tool) => tool.trim().length === 0) ||
     typeof loadout.model !== "string" ||
     loadout.model.trim().length === 0 ||
+    (loadout.modelProviderExtension !== null &&
+      !isNonEmptyAbsolutePath(loadout.modelProviderExtension)) ||
     !isNullableString(loadout.thinking) ||
     !isNullableString(loadout.identity) ||
     typeof loadout.autoExit !== "boolean" ||

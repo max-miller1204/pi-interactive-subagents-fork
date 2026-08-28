@@ -340,6 +340,7 @@ describe("session.ts", () => {
         subagents_list: "/extensions/subagents.ts",
       },
       model: "openrouter/z-ai/glm-5.2",
+      modelProviderExtension: null,
       thinking: "medium",
       systemPromptMode: "append",
       identity: "You are a worker agent.",
@@ -388,6 +389,8 @@ describe("session.ts", () => {
         { agentDir: "relative/agent" },
         { model: null },
         { model: "" },
+        { modelProviderExtension: undefined },
+        { modelProviderExtension: "relative/provider.ts" },
         { toolAllowlist: null },
         { toolAllowlist: "" },
       ]) {
@@ -1288,11 +1291,53 @@ describe("subagent discovery", () => {
         tools,
       );
 
-      assert.deepEqual(resolution.toolExtensions, {
+      assert.equal(Object.getPrototypeOf(resolution.toolExtensions), null);
+      assert.deepEqual({ ...resolution.toolExtensions }, {
         web_search: provider,
         fetch_content: provider,
       });
       assert.deepEqual(resolution.unresolved, ["missing_tool"]);
+    });
+  });
+
+  it("supports prototype-named extension tools without inherited manifest entries", () => {
+    withTempDir((dir) => {
+      const provider = join(dir, "prototype-tool.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      const resolution = testApi.resolveToolExtensionManifest("__proto__", [
+        { name: "__proto__", sourceInfo: { path: provider, source: "extension" } },
+      ]);
+      assert.equal(Object.getPrototypeOf(resolution.toolExtensions), null);
+      assert.equal(Object.hasOwn(resolution.toolExtensions, "__proto__"), true);
+      assert.equal(resolution.toolExtensions.__proto__, provider);
+      assert.deepEqual(resolution.unresolved, []);
+    });
+  });
+
+  it("pins runtime model providers only through loadable registered extensions", () => {
+    withTempDir((dir) => {
+      const providerName = `corporate_${Date.now()}_${Math.random()}`;
+      const provider = join(dir, "corporate-provider.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      const builtInRegistry = { registeredProviders: new Map() };
+      assert.equal(
+        testApi.resolveModelProviderExtension(`${providerName}/model`, builtInRegistry),
+        null,
+      );
+      assert.throws(
+        () => testApi.resolveModelProviderExtension(`${providerName}/model`, {}),
+        /Cannot inspect runtime provider ownership/,
+      );
+      const runtimeRegistry = { registeredProviders: new Map([[providerName, {}]]) };
+      assert.throws(
+        () => testApi.resolveModelProviderExtension(`${providerName}/model`, runtimeRegistry),
+        /Cannot pin runtime model provider/,
+      );
+      subagentsModule.registerModelProviderExtension(providerName, provider);
+      assert.equal(
+        testApi.resolveModelProviderExtension(`${providerName}/model`, runtimeRegistry),
+        provider,
+      );
     });
   });
 
@@ -1495,6 +1540,7 @@ describe("subagent discovery", () => {
             ),
           },
           model: "openrouter/z-ai/glm-5.2",
+          modelProviderExtension: null,
           thinking: "medium",
           systemPromptMode: "append",
           identity: "You are a worker.",
@@ -1542,6 +1588,7 @@ describe("subagent discovery", () => {
             fetch_content: pinnedProvider,
           },
           model: "openrouter/test-model",
+          modelProviderExtension: pinnedProvider,
           thinking: null,
           systemPromptMode: null,
           identity: null,
@@ -1556,6 +1603,37 @@ describe("subagent discovery", () => {
       const extensionArgs = parts.filter((part, index) => parts[index - 1] === "-e");
       assert.deepEqual(extensionArgs, [`'${pinnedProvider}'`]);
       assert.ok(!parts.join(" ").includes(currentProvider));
+    });
+  });
+
+  it("applySandboxToParts replays a model provider without extension-backed tools", () => {
+    withTempDir((d) => {
+      const provider = join(d, "model-provider.ts");
+      writeFileSync(provider, "export default () => {};", "utf8");
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          version: 2,
+          agent: "scout",
+          toolAllowlist: "read,ask_question",
+          toolExtensions: {},
+          model: "corporate/model",
+          modelProviderExtension: provider,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: d,
+          agentDir: join(d, "agent"),
+        },
+        { artifactDir: d, name: "scout" },
+      );
+      assert.deepEqual(
+        parts.filter((part, index) => parts[index - 1] === "-e"),
+        [`'${provider}'`],
+      );
     });
   });
 
@@ -1585,6 +1663,7 @@ describe("subagent discovery", () => {
         toolAllowlist: "web_search,ask_question",
         toolExtensions: { web_search: join(d, "removed-provider.ts") },
         model: "openrouter/test-model",
+        modelProviderExtension: null,
         thinking: null,
         systemPromptMode: null,
         identity: null,
@@ -1601,6 +1680,14 @@ describe("subagent discovery", () => {
         () => testApi.applySandboxToParts([], missingSnapshot, { artifactDir: d, name: "researcher" }),
         /Cannot safely apply subagent sandbox/,
       );
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot({
+          ...missingSnapshot,
+          toolAllowlist: "toString,ask_question",
+          toolExtensions: {},
+        }),
+        /no backing extension for "toString"/,
+      );
     });
   });
 
@@ -1615,6 +1702,7 @@ describe("subagent discovery", () => {
           toolAllowlist: "read,write,ask_question",
           toolExtensions: {},
           model: "openrouter/test-model",
+          modelProviderExtension: null,
           thinking: null,
           systemPromptMode: null,
           identity: null,
