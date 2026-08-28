@@ -95,14 +95,16 @@ export function seedSubagentSessionFile(params: {
  * deleted.
  */
 export interface SubagentLoadout {
-  /** Snapshot schema. Version 2 pins backing extension paths for exact replay. */
-  version: 2;
+  /** Snapshot schema. Version 3 pins all executable extension paths for exact replay. */
+  version: 3;
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
   /** Exact non-empty `--tools` allowlist used by the child. */
   toolAllowlist: string;
   /** Allowed extension-backed tool name → exact extension entry file. */
   toolExtensions: Record<string, string>;
+  /** Exact control extension entry file providing the child lifecycle tools. */
+  controlExtension: string;
   nativeTools: string[];
   /** Exact model id (without thinking suffix) used by the child. */
   model: string;
@@ -148,6 +150,15 @@ function isNonEmptyAbsolutePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && isAbsolute(value);
 }
 
+function isExistingAbsoluteFile(value: unknown): value is string {
+  if (!isNonEmptyAbsolutePath(value)) return false;
+  try {
+    return statSync(value).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const loadout = value as Record<string, unknown>;
@@ -164,12 +175,13 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     return false;
   }
   if (
-    loadout.version !== 2 ||
+    loadout.version !== 3 ||
     !isNullableString(loadout.agent) ||
     typeof loadout.toolAllowlist !== "string" ||
     loadout.toolAllowlist.split(",").every((tool) => tool.trim().length === 0) ||
     typeof loadout.model !== "string" ||
     loadout.model.trim().length === 0 ||
+    !isExistingAbsoluteFile(loadout.controlExtension) ||
     (loadout.modelProviderExtension !== null &&
       !isNonEmptyAbsolutePath(loadout.modelProviderExtension)) ||
     !isNullableString(loadout.thinking) ||
@@ -207,7 +219,7 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     : !hasAnySpawningTool;
 }
 
-/** Read a valid version-2 subagent loadout snapshot, or null. */
+/** Read a valid version-3 subagent loadout snapshot, or null. */
 export function readSubagentLoadout(sessionFile: string): SubagentLoadout | null {
   try {
     const p = loadoutSidecarPath(sessionFile);

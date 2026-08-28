@@ -10,6 +10,9 @@ import { shellEscape } from "../../pi-extension/subagents/tmux.ts";
 import type { SubagentLoadout } from "../../pi-extension/subagents/session.ts";
 
 const fixtureProvider = fileURLToPath(new URL("./fixtures/tool-provider.ts", import.meta.url));
+const controlExtension = fileURLToPath(
+  new URL("../../pi-extension/subagents/subagent-done.ts", import.meta.url),
+);
 
 describe("restricted tool-extension sandbox", () => {
   it("loads only pinned extensions and activates only allowlisted tools", () => {
@@ -30,10 +33,11 @@ describe("restricted tool-extension sandbox", () => {
       );
 
       const loadout: SubagentLoadout = {
-        version: 2,
+        version: 3,
         agent: "integration",
         toolAllowlist: "allowed_tool",
         toolExtensions: { allowed_tool: fixtureProvider },
+        controlExtension,
         nativeTools: [],
         model: "anthropic/claude-sonnet-4-5",
         modelProviderExtension: null,

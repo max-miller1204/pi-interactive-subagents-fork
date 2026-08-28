@@ -1017,13 +1017,20 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
     return "sandbox snapshot has a malformed tool allowlist";
   }
   if (
-    loadout.version !== 2 ||
+    loadout.version !== 3 ||
     !loadout.toolExtensions ||
     typeof loadout.toolExtensions !== "object" ||
     Array.isArray(loadout.toolExtensions) ||
     !Array.isArray(loadout.nativeTools)
   ) {
     return "sandbox snapshot predates extension-manifest pinning";
+  }
+
+  if (typeof loadout.controlExtension !== "string" || !isAbsolute(loadout.controlExtension)) {
+    return "sandbox snapshot has no absolute control extension path";
+  }
+  if (!isLoadableExtensionPath(loadout.controlExtension)) {
+    return `snapshotted control extension no longer exists as a file: ${loadout.controlExtension}`;
   }
 
   const requiredTools = new Set(
@@ -1098,7 +1105,7 @@ function applySandboxToParts(
   parts.push("--no-extensions");
   parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
-  const extPaths = new Set(Object.values(loadout.toolExtensions));
+  const extPaths = new Set([loadout.controlExtension, ...Object.values(loadout.toolExtensions)]);
   if (loadout.modelProviderExtension) extPaths.add(loadout.modelProviderExtension);
   for (const extPath of extPaths) {
     parts.push("-e", shellEscape(extPath));
@@ -1597,16 +1604,16 @@ async function launchSubagent(
   parts.push("--session", shellEscape(subagentSessionFile));
 
   const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-  parts.push("-e", shellEscape(subagentDonePath));
 
   // Snapshot the fully-resolved sandbox beside the session file so a later
   // `subagent_message({ name })` resume can replay the exact same
   // restriction instead of relaunching pi with all global extensions + tools.
   const loadout: SubagentLoadout = {
-    version: 2,
+    version: 3,
     agent: params.agent ?? null,
     toolAllowlist,
     toolExtensions,
+    controlExtension: subagentDonePath,
     nativeTools,
     model: `${runtimeModel.provider}/${runtimeModel.id}`,
     modelProviderExtension,
@@ -2432,10 +2439,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Build pi resume command
         const parts = ["pi", "--session", shellEscape(sessionPath)];
-
-        // Load subagent-done extension so the agent can self-terminate if needed
-        const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-        parts.push("-e", shellEscape(subagentDonePath));
 
         const sessionId = ctx.sessionManager.getSessionId();
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);

@@ -60,6 +60,10 @@ import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
 
 // --- Helpers ---
 
+const CONTROL_EXTENSION = fileURLToPath(
+  new URL("../pi-extension/subagents/subagent-done.ts", import.meta.url),
+);
+
 function createTestDir(): string {
   return mkdtempSync(join(tmpdir(), "subagents-test-"));
 }
@@ -334,7 +338,7 @@ describe("session.ts", () => {
 
   describe("subagent loadout snapshot", () => {
     const sample: SubagentLoadout = {
-      version: 2,
+      version: 3,
       agent: "worker",
       toolAllowlist:
         "read,write,edit,safe_bash,web_search,subagent,subagent_message,subagents_list,ask_question",
@@ -345,6 +349,7 @@ describe("session.ts", () => {
         subagent_message: "/extensions/subagents.ts",
         subagents_list: "/extensions/subagents.ts",
       },
+      controlExtension: CONTROL_EXTENSION,
       nativeTools: ["read", "write", "edit"],
       model: "openrouter/z-ai/glm-5.2",
       modelProviderExtension: null,
@@ -398,6 +403,10 @@ describe("session.ts", () => {
         { model: "" },
         { modelProviderExtension: undefined },
         { modelProviderExtension: "relative/provider.ts" },
+        { version: 2 },
+        { controlExtension: undefined },
+        { controlExtension: "relative/control.ts" },
+        { controlExtension: join(dir, "missing-control.ts") },
         { nativeTools: undefined },
         { nativeTools: ["read", "read"] },
         { nativeTools: [""] },
@@ -1583,7 +1592,7 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
-          version: 2,
+          version: 3,
           agent: "worker",
           toolAllowlist:
             "read,write,safe_bash,subagent,subagent_message,subagents_list,ask_question",
@@ -1601,6 +1610,7 @@ describe("subagent discovery", () => {
               new URL("../pi-extension/subagents/index.ts", import.meta.url),
             ),
           },
+          controlExtension: CONTROL_EXTENSION,
           nativeTools: ["read", "write"],
           model: "openrouter/z-ai/glm-5.2",
           modelProviderExtension: null,
@@ -1635,21 +1645,26 @@ describe("subagent discovery", () => {
   it("applySandboxToParts uses only pinned paths and deduplicates shared providers", () => {
     withTempDir((d) => {
       const pinnedProvider = join(d, "pinned-provider.ts");
+      const pinnedControl = join(d, "pinned-control.ts");
       const currentProvider = join(d, "current-provider.ts");
+      const currentControl = join(d, "current-control.ts");
       writeFileSync(pinnedProvider, "export default () => {};", "utf8");
+      writeFileSync(pinnedControl, "export default () => {};", "utf8");
       writeFileSync(currentProvider, "export default () => {};", "utf8");
+      writeFileSync(currentControl, "export default () => {};", "utf8");
       const parts: string[] = [];
 
       testApi.applySandboxToParts(
         parts,
         {
-          version: 2,
+          version: 3,
           agent: "researcher",
           toolAllowlist: "web_search,fetch_content,ask_question",
           toolExtensions: {
             web_search: pinnedProvider,
             fetch_content: pinnedProvider,
           },
+          controlExtension: pinnedControl,
           nativeTools: [],
           model: "openrouter/test-model",
           modelProviderExtension: pinnedProvider,
@@ -1665,8 +1680,9 @@ describe("subagent discovery", () => {
       );
 
       const extensionArgs = parts.filter((part, index) => parts[index - 1] === "-e");
-      assert.deepEqual(extensionArgs, [`'${pinnedProvider}'`]);
+      assert.deepEqual(extensionArgs, [`'${pinnedControl}'`, `'${pinnedProvider}'`]);
       assert.ok(!parts.join(" ").includes(currentProvider));
+      assert.ok(!parts.join(" ").includes(currentControl));
     });
   });
 
@@ -1678,10 +1694,11 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
-          version: 2,
+          version: 3,
           agent: "scout",
           toolAllowlist: "read,ask_question",
           toolExtensions: {},
+          controlExtension: CONTROL_EXTENSION,
           nativeTools: ["read"],
           model: "corporate/model",
           modelProviderExtension: provider,
@@ -1697,7 +1714,7 @@ describe("subagent discovery", () => {
       );
       assert.deepEqual(
         parts.filter((part, index) => parts[index - 1] === "-e"),
-        [`'${provider}'`],
+        [`'${CONTROL_EXTENSION}'`, `'${provider}'`],
       );
     });
   });
@@ -1723,10 +1740,11 @@ describe("subagent discovery", () => {
       );
 
       const missingSnapshot: SubagentLoadout = {
-        version: 2,
+        version: 3,
         agent: "researcher",
         toolAllowlist: "web_search,ask_question",
         toolExtensions: { web_search: join(d, "removed-provider.ts") },
+        controlExtension: CONTROL_EXTENSION,
         nativeTools: [],
         model: "openrouter/test-model",
         modelProviderExtension: null,
@@ -1744,6 +1762,21 @@ describe("subagent discovery", () => {
       );
       assert.throws(
         () => testApi.applySandboxToParts([], missingSnapshot, { artifactDir: d, name: "researcher" }),
+        /Cannot safely apply subagent sandbox/,
+      );
+      const missingControlSnapshot = {
+        ...missingSnapshot,
+        toolAllowlist: "read,ask_question",
+        toolExtensions: {},
+        nativeTools: ["read"],
+        controlExtension: join(d, "removed-control.ts"),
+      };
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot(missingControlSnapshot),
+        /control extension no longer exists/,
+      );
+      assert.throws(
+        () => testApi.applySandboxToParts([], missingControlSnapshot, { artifactDir: d, name: "researcher" }),
         /Cannot safely apply subagent sandbox/,
       );
       assert.match(
@@ -1764,10 +1797,11 @@ describe("subagent discovery", () => {
       testApi.applySandboxToParts(
         parts,
         {
-          version: 2,
+          version: 3,
           agent: null,
           toolAllowlist: "read,write,ask_question",
           toolExtensions: {},
+          controlExtension: CONTROL_EXTENSION,
           nativeTools: ["read", "write"],
           model: "openrouter/test-model",
           modelProviderExtension: null,
@@ -1787,6 +1821,8 @@ describe("subagent discovery", () => {
         "--no-extensions",
         "--tools",
         "'read,write,ask_question'",
+        "-e",
+        `'${CONTROL_EXTENSION}'`,
       ]);
     });
   });
