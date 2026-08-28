@@ -327,11 +327,14 @@ describe("session.ts", () => {
     const sample: SubagentLoadout = {
       version: 2,
       agent: "worker",
-      toolAllowlist: "read,write,edit,safe_bash,web_search,subagent,ask_question",
+      toolAllowlist:
+        "read,write,edit,safe_bash,web_search,subagent,subagent_message,subagents_list,ask_question",
       toolExtensions: {
         safe_bash: "/extensions/safe-bash.ts",
         web_search: "/extensions/web-search.ts",
         subagent: "/extensions/subagents.ts",
+        subagent_message: "/extensions/subagents.ts",
+        subagents_list: "/extensions/subagents.ts",
       },
       model: "openrouter/z-ai/glm-5.2",
       thinking: "medium",
@@ -372,6 +375,35 @@ describe("session.ts", () => {
         "utf8",
       );
       assert.equal(readSubagentLoadout(malformed), null);
+    });
+
+    it("rejects snapshots that cannot replay exact launch paths and model", () => {
+      for (const patch of [
+        { cwd: null },
+        { cwd: "relative/work" },
+        { agentDir: "" },
+        { agentDir: "relative/agent" },
+        { model: null },
+        { model: "" },
+      ]) {
+        const sessionFile = join(dir, `invalid-${Math.random()}.jsonl`);
+        writeFileSync(sessionFile + ".loadout.json", JSON.stringify({ ...sample, ...patch }), "utf8");
+        assert.equal(readSubagentLoadout(sessionFile), null);
+      }
+    });
+
+    it("rejects inconsistent nested-spawn permissions", () => {
+      const cases = [
+        { toolAllowlist: sample.toolAllowlist, spawnable: null },
+        { toolAllowlist: "read,subagent,ask_question", spawnable: ["scout"] },
+        { toolAllowlist: "read,write,ask_question", spawnable: ["scout"] },
+        { toolAllowlist: "read,write,ask_question", spawnable: [] },
+      ];
+      for (const patch of cases) {
+        const sessionFile = join(dir, `spawn-invalid-${Math.random()}.jsonl`);
+        writeFileSync(sessionFile + ".loadout.json", JSON.stringify({ ...sample, ...patch }), "utf8");
+        assert.equal(readSubagentLoadout(sessionFile), null);
+      }
     });
   });
 
@@ -1360,6 +1392,27 @@ describe("subagent discovery", () => {
     assert.equal(testApi.buildSubagentToolAllowlist(""), null);
   });
 
+  it("pins the active parent model when no override is configured", () => {
+    assert.equal(
+      testApi.resolveLaunchModel(undefined, undefined, {
+        provider: "openrouter",
+        id: "anthropic/claude-sonnet-4",
+      }),
+      "openrouter/anthropic/claude-sonnet-4",
+    );
+    assert.equal(
+      testApi.resolveLaunchModel("openai/gpt-5", "anthropic/agent-default", {
+        provider: "openrouter",
+        id: "fallback",
+      }),
+      "openai/gpt-5",
+    );
+    assert.throws(
+      () => testApi.resolveLaunchModel(undefined, undefined, undefined),
+      /without an active parent model/,
+    );
+  });
+
   it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {
     withTempDir((d) => {
       const parts: string[] = [];
@@ -1368,10 +1421,20 @@ describe("subagent discovery", () => {
         {
           version: 2,
           agent: "worker",
-          toolAllowlist: "read,write,safe_bash",
+          toolAllowlist:
+            "read,write,safe_bash,subagent,subagent_message,subagents_list,ask_question",
           toolExtensions: {
             safe_bash: fileURLToPath(
               new URL("../pi-extension/subagents/tools/safe-bash.ts", import.meta.url),
+            ),
+            subagent: fileURLToPath(
+              new URL("../pi-extension/subagents/index.ts", import.meta.url),
+            ),
+            subagent_message: fileURLToPath(
+              new URL("../pi-extension/subagents/index.ts", import.meta.url),
+            ),
+            subagents_list: fileURLToPath(
+              new URL("../pi-extension/subagents/index.ts", import.meta.url),
             ),
           },
           model: "openrouter/z-ai/glm-5.2",
@@ -1380,7 +1443,7 @@ describe("subagent discovery", () => {
           identity: "You are a worker.",
           spawnable: ["scout"],
           autoExit: true,
-          cwd: null,
+          cwd: d,
           agentDir: join(d, "agent"),
         },
         { artifactDir: d, name: "worker" },
@@ -1421,13 +1484,13 @@ describe("subagent discovery", () => {
             web_search: pinnedProvider,
             fetch_content: pinnedProvider,
           },
-          model: null,
+          model: "openrouter/test-model",
           thinking: null,
           systemPromptMode: null,
           identity: null,
           spawnable: null,
           autoExit: true,
-          cwd: null,
+          cwd: d,
           agentDir: join(d, "agent"),
         },
         { artifactDir: d, name: "researcher" },
@@ -1464,13 +1527,13 @@ describe("subagent discovery", () => {
         agent: "researcher",
         toolAllowlist: "web_search,ask_question",
         toolExtensions: { web_search: join(d, "removed-provider.ts") },
-        model: null,
+        model: "openrouter/test-model",
         thinking: null,
         systemPromptMode: null,
         identity: null,
         spawnable: null,
         autoExit: true,
-        cwd: null,
+        cwd: d,
         agentDir: join(d, "agent"),
       };
       assert.match(
@@ -1494,18 +1557,18 @@ describe("subagent discovery", () => {
           agent: null,
           toolAllowlist: null,
           toolExtensions: {},
-          model: null,
+          model: "openrouter/test-model",
           thinking: null,
           systemPromptMode: null,
           identity: null,
           spawnable: null,
           autoExit: false,
-          cwd: null,
+          cwd: d,
           agentDir: join(d, "agent"),
         },
         { artifactDir: d, name: "fork" },
       );
-      assert.deepEqual(parts, []);
+      assert.deepEqual(parts, ["--model", "'openrouter/test-model'"]);
     });
   });
 

@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export interface SessionEntry {
   type: string;
@@ -103,8 +103,8 @@ export interface SubagentLoadout {
   toolAllowlist: string | null;
   /** Allowed extension-backed tool name → exact extension entry file. */
   toolExtensions: Record<string, string>;
-  /** Model id (without thinking suffix), or null to use the session default. */
-  model: string | null;
+  /** Exact model id (without thinking suffix) used by the child. */
+  model: string;
   /** Thinking level appended to the model as `model:level`, or null. */
   thinking: string | null;
   /** How the identity text was applied: append/replace, or null. */
@@ -115,8 +115,8 @@ export interface SubagentLoadout {
   spawnable: string[] | null;
   /** Whether the agent auto-exits (informational; resume forces autonomous). */
   autoExit: boolean;
-  /** Working directory the subagent ran in, or null. */
-  cwd: string | null;
+  /** Absolute working directory the subagent ran in. */
+  cwd: string;
   /** Exact PI_CODING_AGENT_DIR used by the original child process. */
   agentDir: string;
 }
@@ -140,6 +140,12 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+const SNAPSHOTTED_SPAWNING_TOOLS = ["subagent", "subagent_message", "subagents_list"];
+
+function isNonEmptyAbsolutePath(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && isAbsolute(value);
+}
+
 function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const loadout = value as Record<string, unknown>;
@@ -152,12 +158,13 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     loadout.version !== 2 ||
     !isNullableString(loadout.agent) ||
     !isNullableString(loadout.toolAllowlist) ||
-    !isNullableString(loadout.model) ||
+    typeof loadout.model !== "string" ||
+    loadout.model.trim().length === 0 ||
     !isNullableString(loadout.thinking) ||
     !isNullableString(loadout.identity) ||
     typeof loadout.autoExit !== "boolean" ||
-    !isNullableString(loadout.cwd) ||
-    typeof loadout.agentDir !== "string"
+    !isNonEmptyAbsolutePath(loadout.cwd) ||
+    !isNonEmptyAbsolutePath(loadout.agentDir)
   ) {
     return false;
   }
@@ -168,10 +175,24 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
   ) {
     return false;
   }
-  return (
+  const spawnableIsValid =
     loadout.spawnable === null ||
-    (Array.isArray(loadout.spawnable) && loadout.spawnable.every((agent) => typeof agent === "string"))
+    (Array.isArray(loadout.spawnable) &&
+      loadout.spawnable.length > 0 &&
+      loadout.spawnable.every((agent) => typeof agent === "string" && agent.trim().length > 0));
+  if (!spawnableIsValid) return false;
+
+  const allowedTools = new Set(
+    typeof loadout.toolAllowlist === "string"
+      ? loadout.toolAllowlist.split(",").map((tool) => tool.trim()).filter(Boolean)
+      : [],
   );
+  const hasAllSpawningTools = SNAPSHOTTED_SPAWNING_TOOLS.every((tool) => allowedTools.has(tool));
+  const hasAnySpawningTool = SNAPSHOTTED_SPAWNING_TOOLS.some((tool) => allowedTools.has(tool));
+  const hasSpawnableWhitelist = loadout.spawnable !== null;
+  return hasSpawnableWhitelist
+    ? hasAllSpawningTools
+    : !hasAnySpawningTool;
 }
 
 /** Read a valid version-2 subagent loadout snapshot, or null. */

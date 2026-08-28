@@ -430,6 +430,22 @@ function resolveEffectiveSessionMode(
   return agentDefs?.sessionMode ?? "standalone";
 }
 
+function resolveLaunchModel(
+  requestedModel: string | undefined,
+  agentModel: string | undefined,
+  activeModel: { provider: string; id: string } | undefined,
+): string {
+  const configuredModel = requestedModel ?? agentModel;
+  if (configuredModel !== undefined) {
+    if (configuredModel.trim().length === 0) throw new Error("Subagent model must not be empty");
+    return configuredModel;
+  }
+  if (!activeModel || !activeModel.provider.trim() || !activeModel.id.trim()) {
+    throw new Error("Cannot launch subagent without an active parent model");
+  }
+  return `${activeModel.provider}/${activeModel.id}`;
+}
+
 function resolveLaunchBehavior(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
@@ -1236,6 +1252,7 @@ export const __test__ = {
   loadAgentDefaults,
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
+  resolveLaunchModel,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
@@ -1280,14 +1297,18 @@ function startWidgetRefresh() {
  */
 async function launchSubagent(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
+  ctx: {
+    sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
+    cwd: string;
+    model: { provider: string; id: string } | undefined;
+  },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  const effectiveModel = resolveLaunchModel(params.model, agentDefs?.model, ctx.model);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1456,7 +1477,7 @@ async function launchSubagent(
     agent: params.agent ?? null,
     toolAllowlist,
     toolExtensions,
-    model: effectiveModel ?? null,
+    model: effectiveModel,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
     identity: identityInSystemPrompt ? identity : null,
