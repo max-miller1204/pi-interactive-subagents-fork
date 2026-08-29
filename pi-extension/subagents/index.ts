@@ -210,15 +210,21 @@ const COMPATIBILITY_REGISTRY_LIFECYCLE_KEY = Symbol.for(
 );
 interface CompatibilityRegistryLifecycle {
   pending: boolean;
-  renewedTools: Set<string>;
-  renewedProviders: Set<string>;
+  stagedTools: Map<string, string>;
+  stagedProviders: Map<string, string>;
 }
 const COMPATIBILITY_REGISTRY_LIFECYCLE: CompatibilityRegistryLifecycle =
   (globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] ?? {
     pending: false,
-    renewedTools: new Set<string>(),
-    renewedProviders: new Set<string>(),
+    stagedTools: new Map<string, string>(),
+    stagedProviders: new Map<string, string>(),
   };
+if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools instanceof Map)) {
+  COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools = new Map<string, string>();
+}
+if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders instanceof Map)) {
+  COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders = new Map<string, string>();
+}
 (globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] = COMPATIBILITY_REGISTRY_LIFECYCLE;
 
 function isLoadableExtensionPath(extensionPath: unknown): extensionPath is string {
@@ -243,22 +249,24 @@ export function registerToolExtension(name: string, extensionPath: string): void
   if (!isLoadableExtensionPath(extensionPath)) {
     throw new Error(`Tool extension path for "${name}" must be an absolute existing file: ${extensionPath}`);
   }
-  const existing = EXTRA_TOOL_EXTENSIONS.get(name);
-  if (existing === extensionPath) {
-    if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
-      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.add(name);
+  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+    const staged = COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.get(name);
+    if (staged !== undefined && staged !== extensionPath) {
+      throw new Error(
+        `Tool extension already registered for "${name}" in this reload: ${staged} (refusing to overwrite with ${extensionPath})`,
+      );
     }
+    COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.set(name, extensionPath);
     return;
   }
+  const existing = EXTRA_TOOL_EXTENSIONS.get(name);
+  if (existing === extensionPath) return;
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
-  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
-    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.add(name);
-  }
 }
 
 export function registerModelProviderExtension(provider: string, extensionPath: string): void {
@@ -268,22 +276,24 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
       `Model provider extension path for "${provider}" must be an absolute existing file: ${extensionPath}`,
     );
   }
-  const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
-  if (existing === extensionPath) {
-    if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
-      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.add(provider);
+  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+    const staged = COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.get(provider);
+    if (staged !== undefined && staged !== extensionPath) {
+      throw new Error(
+        `Model provider extension already registered for "${provider}" in this reload: ${staged} (refusing to overwrite with ${extensionPath})`,
+      );
     }
+    COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.set(provider, extensionPath);
     return;
   }
+  const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
+  if (existing === extensionPath) return;
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Model provider extension already registered for "${provider}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
-  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
-    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.add(provider);
-  }
 }
 
 // Compatibility hook for extensions that explicitly register child-only tools.
@@ -1950,20 +1960,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
       if (event.reason === "reload") {
-        for (const name of EXTRA_TOOL_EXTENSIONS.keys()) {
-          if (!COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.has(name)) {
-            EXTRA_TOOL_EXTENSIONS.delete(name);
-          }
+        EXTRA_TOOL_EXTENSIONS.clear();
+        for (const [name, extensionPath] of COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools) {
+          EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
         }
-        for (const provider of MODEL_PROVIDER_EXTENSIONS.keys()) {
-          if (!COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.has(provider)) {
-            MODEL_PROVIDER_EXTENSIONS.delete(provider);
-          }
+        MODEL_PROVIDER_EXTENSIONS.clear();
+        for (const [provider, extensionPath] of COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders) {
+          MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
         }
       }
       COMPATIBILITY_REGISTRY_LIFECYCLE.pending = false;
-      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.clear();
-      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.clear();
+      COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.clear();
+      COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.clear();
     }
     latestCtx = ctx;
     // pi runs multiple sessions in one process. A prior session's shutdown
@@ -1995,8 +2003,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     }
     runningSubagents.clear();
     COMPATIBILITY_REGISTRY_LIFECYCLE.pending = true;
-    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.clear();
-    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.clear();
+    COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.clear();
+    COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.clear();
   });
 
   // The spawning tools are always registered here. Whether a child process can

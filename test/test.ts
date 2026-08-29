@@ -1375,47 +1375,79 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("prunes disabled compatibility registrations after reload", () => {
+  it("commits same-path and moved registrations while pruning disabled reload entries", () => {
     withTempDir((dir) => {
-      const renewedTool = `renewed_tool_${Date.now()}_${Math.random()}`;
+      const sameTool = `same_tool_${Date.now()}_${Math.random()}`;
+      const movedTool = `moved_tool_${Date.now()}_${Math.random()}`;
       const disabledTool = `disabled_tool_${Date.now()}_${Math.random()}`;
-      const renewedProvider = `renewed_provider_${Date.now()}_${Math.random()}`;
+      const sameProvider = `same_provider_${Date.now()}_${Math.random()}`;
+      const movedProvider = `moved_provider_${Date.now()}_${Math.random()}`;
       const disabledProvider = `disabled_provider_${Date.now()}_${Math.random()}`;
-      const renewedToolPath = join(dir, "renewed-tool.ts");
+      const sameToolPath = join(dir, "same-tool.ts");
+      const movedToolOldPath = join(dir, "moved-tool-old.ts");
+      const movedToolNewPath = join(dir, "moved-tool-new.ts");
+      const movedToolConflictPath = join(dir, "moved-tool-conflict.ts");
       const disabledToolPath = join(dir, "disabled-tool.ts");
-      const renewedProviderPath = join(dir, "renewed-provider.ts");
+      const sameProviderPath = join(dir, "same-provider.ts");
+      const movedProviderOldPath = join(dir, "moved-provider-old.ts");
+      const movedProviderNewPath = join(dir, "moved-provider-new.ts");
+      const movedProviderConflictPath = join(dir, "moved-provider-conflict.ts");
       const disabledProviderPath = join(dir, "disabled-provider.ts");
-      for (const path of [renewedToolPath, disabledToolPath, renewedProviderPath, disabledProviderPath]) {
+      for (const path of [
+        sameToolPath,
+        movedToolOldPath,
+        movedToolNewPath,
+        movedToolConflictPath,
+        disabledToolPath,
+        sameProviderPath,
+        movedProviderOldPath,
+        movedProviderNewPath,
+        movedProviderConflictPath,
+        disabledProviderPath,
+      ]) {
         writeFileSync(path, "export default () => {};", "utf8");
       }
 
       const { api, eventHandlers } = createMockExtensionApi();
       subagentsModule.default(api as any);
-      subagentsModule.registerToolExtension(renewedTool, renewedToolPath);
+      subagentsModule.registerToolExtension(sameTool, sameToolPath);
+      subagentsModule.registerToolExtension(movedTool, movedToolOldPath);
       subagentsModule.registerToolExtension(disabledTool, disabledToolPath);
-      subagentsModule.registerModelProviderExtension(renewedProvider, renewedProviderPath);
+      subagentsModule.registerModelProviderExtension(sameProvider, sameProviderPath);
+      subagentsModule.registerModelProviderExtension(movedProvider, movedProviderOldPath);
       subagentsModule.registerModelProviderExtension(disabledProvider, disabledProviderPath);
 
       const shutdown = eventHandlers.get("session_shutdown")?.[0];
       assert.ok(shutdown);
       shutdown({ type: "session_shutdown" }, {});
-      assert.equal(testApi.getToolExtensionPath(disabledTool, []), disabledToolPath);
-      assert.equal(
-        testApi.resolveModelProviderExtension({ provider: disabledProvider, id: "model" } as any),
-        disabledProviderPath,
+      subagentsModule.registerToolExtension(sameTool, sameToolPath);
+      subagentsModule.registerToolExtension(sameTool, sameToolPath);
+      subagentsModule.registerToolExtension(movedTool, movedToolNewPath);
+      subagentsModule.registerModelProviderExtension(sameProvider, sameProviderPath);
+      subagentsModule.registerModelProviderExtension(sameProvider, sameProviderPath);
+      subagentsModule.registerModelProviderExtension(movedProvider, movedProviderNewPath);
+      assert.throws(
+        () => subagentsModule.registerToolExtension(movedTool, movedToolConflictPath),
+        /already registered.*in this reload/,
       );
-
-      subagentsModule.registerToolExtension(renewedTool, renewedToolPath);
-      subagentsModule.registerModelProviderExtension(renewedProvider, renewedProviderPath);
+      assert.throws(
+        () => subagentsModule.registerModelProviderExtension(movedProvider, movedProviderConflictPath),
+        /already registered.*in this reload/,
+      );
 
       const start = eventHandlers.get("session_start")?.[0];
       assert.ok(start);
       start({ type: "session_start", reason: "reload" }, {});
-      assert.equal(testApi.getToolExtensionPath(renewedTool, []), renewedToolPath);
+      assert.equal(testApi.getToolExtensionPath(sameTool, []), sameToolPath);
+      assert.equal(testApi.getToolExtensionPath(movedTool, []), movedToolNewPath);
       assert.equal(testApi.getToolExtensionPath(disabledTool, []), undefined);
       assert.equal(
-        testApi.resolveModelProviderExtension({ provider: renewedProvider, id: "model" } as any),
-        renewedProviderPath,
+        testApi.resolveModelProviderExtension({ provider: sameProvider, id: "model" } as any),
+        sameProviderPath,
+      );
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: movedProvider, id: "model" } as any),
+        movedProviderNewPath,
       );
       assert.equal(
         testApi.resolveModelProviderExtension({ provider: disabledProvider, id: "model" } as any),
@@ -1429,9 +1461,13 @@ describe("subagent discovery", () => {
       const toolName = `session_tool_${Date.now()}_${Math.random()}`;
       const providerName = `session_provider_${Date.now()}_${Math.random()}`;
       const toolPath = join(dir, "session-tool.ts");
+      const conflictingToolPath = join(dir, "session-tool-conflict.ts");
       const providerPath = join(dir, "session-provider.ts");
+      const conflictingProviderPath = join(dir, "session-provider-conflict.ts");
       writeFileSync(toolPath, "export default () => {};", "utf8");
+      writeFileSync(conflictingToolPath, "export default () => {};", "utf8");
       writeFileSync(providerPath, "export default () => {};", "utf8");
+      writeFileSync(conflictingProviderPath, "export default () => {};", "utf8");
 
       const { api, eventHandlers } = createMockExtensionApi();
       subagentsModule.default(api as any);
@@ -1449,6 +1485,14 @@ describe("subagent discovery", () => {
       assert.equal(
         testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
         providerPath,
+      );
+      assert.throws(
+        () => subagentsModule.registerToolExtension(toolName, conflictingToolPath),
+        /already registered/,
+      );
+      assert.throws(
+        () => subagentsModule.registerModelProviderExtension(providerName, conflictingProviderPath),
+        /already registered/,
       );
     });
   });
