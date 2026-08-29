@@ -165,9 +165,13 @@ export function sendCommand(surface: string, command: string): void {
 }
 
 /**
- * Send a long command to a pane by writing it to a script file first.
- * This avoids terminal line-wrapping issues that break commands exceeding the
- * pane's column width when sent character-by-character via sendCommand.
+ * Launch a long command in a pane by writing it to a script and atomically
+ * replacing the pane's startup shell with that script.
+ *
+ * Using `respawn-pane` avoids two terminal-input races: shell startup can clear
+ * keys sent before the prompt is ready, and startup programs can consume the
+ * typed launch command. Keeping the pane after the script exits preserves its
+ * output and completion sentinel for the parent watcher.
  *
  * By default the script is written to a temp directory, but callers can pass a
  * stable path (for example under session artifacts) so the exact invocation is
@@ -198,7 +202,16 @@ export function sendLongCommand(
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
     mode: 0o755,
   });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+
+  requireTmux();
+  execFileSync("tmux", ["set-option", "-p", "-t", surface, "remain-on-exit", "on"], {
+    encoding: "utf8",
+  });
+  execFileSync(
+    "tmux",
+    ["respawn-pane", "-k", "-t", surface, `bash ${shellEscape(scriptPath)}`],
+    { encoding: "utf8" },
+  );
   return scriptPath;
 }
 

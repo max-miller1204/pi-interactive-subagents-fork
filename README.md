@@ -19,11 +19,7 @@ Spawn several in parallel — they run concurrently and steer results back indep
 
 Panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …).
 
-If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
-
-```bash
-export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
-```
+Launch scripts atomically replace the new pane's startup shell, so slow shell initialization cannot consume or drop a subagent command.
 
 ## Tools
 
