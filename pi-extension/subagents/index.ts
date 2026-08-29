@@ -730,19 +730,6 @@ function widgetIcon(kind: StatusSnapshot["kind"]): string {
   }
 }
 
-/**
- * Wait long enough for a freshly created pane to finish shell startup.
- *
- * Some environments do extra shell-init work before the prompt is ready
- * (for example direnv/devenv), so the delay is configurable for users who hit
- * dropped commands. Keep the historical default at 500ms.
- */
-function getShellReadyDelayMs(): number {
-  const raw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
-  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
-}
-
 function muxUnavailableResult() {
   return {
     content: [
@@ -1431,7 +1418,6 @@ function resolveResumeLaunchBehavior(): { autoExit: boolean; interactive: boolea
 
 export const __test__ = {
   borderLine,
-  getShellReadyDelayMs,
   renderSubagentWidgetLines,
   loadAgentDefaults,
   discoverAgentDefinitions,
@@ -1556,13 +1542,9 @@ async function launchSubagent(
   ].join("-");
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
 
-  // Use pre-created surface (parallel mode) or create a new one.
-  // For new surfaces, pause briefly so the shell is ready before sending the command.
-  const surfacePreCreated = !!options?.surface;
+  // Use a pre-created surface (parallel mode) or create a new one. The launch
+  // script atomically replaces the pane shell, so it does not wait for a prompt.
   const surface = options?.surface ?? createSurface(params.name);
-  if (!surfacePreCreated) {
-    await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
-  }
 
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
 
@@ -2582,7 +2564,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const entryCountBefore = countSessionEntryLines(sessionPath);
 
         const surface = createSurface(name);
-        await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
 
         // Build pi resume command
         const parts = ["pi", "--session", shellEscape(sessionPath)];

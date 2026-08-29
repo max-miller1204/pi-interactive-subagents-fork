@@ -17,6 +17,31 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
+const CLEAR_SUBAGENT_ENV = 'for name in "${!PI_SUBAGENT_@}"; do unset "$name"; done';
+
+const RESPAWN_ENV_EXCLUSIONS = new Set([
+  "TMUX",
+  "TMUX_PANE",
+  "PWD",
+  "OLDPWD",
+  "SHLVL",
+  "BASH_SUBSHELL",
+  "ZSH_SUBSHELL",
+  "_",
+]);
+
+function respawnEnvironmentArgs(): string[] {
+  return Object.entries(process.env).flatMap(([name, value]) => {
+    if (
+      value === undefined ||
+      RESPAWN_ENV_EXCLUSIONS.has(name) ||
+      name.startsWith("PI_SUBAGENT_")
+    ) {
+      return [];
+    }
+    return ["-e", `${name}=${value}`];
+  });
+}
 
 // ── Availability ──
 
@@ -165,9 +190,18 @@ export function sendCommand(surface: string, command: string): void {
 }
 
 /**
- * Send a long command to a pane by writing it to a script file first.
- * This avoids terminal line-wrapping issues that break commands exceeding the
- * pane's column width when sent character-by-character via sendCommand.
+ * Launch a long command in a pane by writing it to a script and atomically
+ * replacing the pane's startup shell with that script.
+ *
+ * Using `respawn-pane` avoids two terminal-input races: shell startup can clear
+ * keys sent before the prompt is ready, and startup programs can consume the
+ * typed launch command. Keeping the pane after the script exits preserves its
+ * output and completion sentinel for the parent watcher.
+ *
+ * The respawn receives the parent Pi process's effective environment, except
+ * for tmux-owned and volatile shell state. The script then clears inherited
+ * `PI_SUBAGENT_*` controls so the command can establish the child's exact
+ * control values without stale session or parent settings leaking through.
  *
  * By default the script is written to a temp directory, but callers can pass a
  * stable path (for example under session artifacts) so the exact invocation is
@@ -193,12 +227,29 @@ export function sendLongCommand(
   if (options?.scriptPreamble) {
     scriptParts.push(options.scriptPreamble.trimEnd());
   }
+  scriptParts.push(CLEAR_SUBAGENT_ENV);
   scriptParts.push(command);
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
     mode: 0o755,
   });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+
+  requireTmux();
+  execFileSync("tmux", ["set-option", "-p", "-t", surface, "remain-on-exit", "on"], {
+    encoding: "utf8",
+  });
+  execFileSync(
+    "tmux",
+    [
+      "respawn-pane",
+      "-k",
+      "-t",
+      surface,
+      ...respawnEnvironmentArgs(),
+      `bash ${shellEscape(scriptPath)}`,
+    ],
+    { encoding: "utf8" },
+  );
   return scriptPath;
 }
 
