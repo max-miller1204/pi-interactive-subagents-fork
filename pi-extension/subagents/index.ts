@@ -205,6 +205,21 @@ const MODEL_PROVIDER_EXTENSION_REGISTRY_KEY = Symbol.for(
 const MODEL_PROVIDER_EXTENSIONS: Map<string, string> =
   (globalThis as any)[MODEL_PROVIDER_EXTENSION_REGISTRY_KEY] ?? new Map<string, string>();
 (globalThis as any)[MODEL_PROVIDER_EXTENSION_REGISTRY_KEY] = MODEL_PROVIDER_EXTENSIONS;
+const COMPATIBILITY_REGISTRY_LIFECYCLE_KEY = Symbol.for(
+  "pi-interactive-subagents/compatibility-registry-lifecycle",
+);
+interface CompatibilityRegistryLifecycle {
+  pending: boolean;
+  renewedTools: Set<string>;
+  renewedProviders: Set<string>;
+}
+const COMPATIBILITY_REGISTRY_LIFECYCLE: CompatibilityRegistryLifecycle =
+  (globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] ?? {
+    pending: false,
+    renewedTools: new Set<string>(),
+    renewedProviders: new Set<string>(),
+  };
+(globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] = COMPATIBILITY_REGISTRY_LIFECYCLE;
 
 function isLoadableExtensionPath(extensionPath: unknown): extensionPath is string {
   if (typeof extensionPath !== "string" || !isAbsolute(extensionPath) || !existsSync(extensionPath)) {
@@ -229,13 +244,21 @@ export function registerToolExtension(name: string, extensionPath: string): void
     throw new Error(`Tool extension path for "${name}" must be an absolute existing file: ${extensionPath}`);
   }
   const existing = EXTRA_TOOL_EXTENSIONS.get(name);
-  if (existing === extensionPath) return;
+  if (existing === extensionPath) {
+    if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.add(name);
+    }
+    return;
+  }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
+  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.add(name);
+  }
 }
 
 export function registerModelProviderExtension(provider: string, extensionPath: string): void {
@@ -246,13 +269,21 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
     );
   }
   const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
-  if (existing === extensionPath) return;
+  if (existing === extensionPath) {
+    if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.add(provider);
+    }
+    return;
+  }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Model provider extension already registered for "${provider}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
+  if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.add(provider);
+  }
 }
 
 // Compatibility hook for extensions that explicitly register child-only tools.
@@ -1916,7 +1947,24 @@ async function watchSubagent(
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
   // Capture the UI context for widget updates
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
+    if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
+      if (event.reason === "reload") {
+        for (const name of EXTRA_TOOL_EXTENSIONS.keys()) {
+          if (!COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.has(name)) {
+            EXTRA_TOOL_EXTENSIONS.delete(name);
+          }
+        }
+        for (const provider of MODEL_PROVIDER_EXTENSIONS.keys()) {
+          if (!COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.has(provider)) {
+            MODEL_PROVIDER_EXTENSIONS.delete(provider);
+          }
+        }
+      }
+      COMPATIBILITY_REGISTRY_LIFECYCLE.pending = false;
+      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.clear();
+      COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.clear();
+    }
     latestCtx = ctx;
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
@@ -1946,8 +1994,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       agent.abortController?.abort();
     }
     runningSubagents.clear();
-    EXTRA_TOOL_EXTENSIONS.clear();
-    MODEL_PROVIDER_EXTENSIONS.clear();
+    COMPATIBILITY_REGISTRY_LIFECYCLE.pending = true;
+    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedTools.clear();
+    COMPATIBILITY_REGISTRY_LIFECYCLE.renewedProviders.clear();
   });
 
   // The spawning tools are always registered here. Whether a child process can

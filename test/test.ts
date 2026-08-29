@@ -1375,40 +1375,81 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("clears compatibility registrations on shutdown and permits renewal", () => {
+  it("prunes disabled compatibility registrations after reload", () => {
     withTempDir((dir) => {
-      const toolName = `reload_tool_${Date.now()}_${Math.random()}`;
-      const providerName = `reload_provider_${Date.now()}_${Math.random()}`;
-      const toolBefore = join(dir, "tool-before.ts");
-      const toolAfter = join(dir, "tool-after.ts");
-      const providerBefore = join(dir, "provider-before.ts");
-      const providerAfter = join(dir, "provider-after.ts");
-      for (const path of [toolBefore, toolAfter, providerBefore, providerAfter]) {
+      const renewedTool = `renewed_tool_${Date.now()}_${Math.random()}`;
+      const disabledTool = `disabled_tool_${Date.now()}_${Math.random()}`;
+      const renewedProvider = `renewed_provider_${Date.now()}_${Math.random()}`;
+      const disabledProvider = `disabled_provider_${Date.now()}_${Math.random()}`;
+      const renewedToolPath = join(dir, "renewed-tool.ts");
+      const disabledToolPath = join(dir, "disabled-tool.ts");
+      const renewedProviderPath = join(dir, "renewed-provider.ts");
+      const disabledProviderPath = join(dir, "disabled-provider.ts");
+      for (const path of [renewedToolPath, disabledToolPath, renewedProviderPath, disabledProviderPath]) {
         writeFileSync(path, "export default () => {};", "utf8");
       }
 
       const { api, eventHandlers } = createMockExtensionApi();
       subagentsModule.default(api as any);
-      subagentsModule.registerToolExtension(toolName, toolBefore);
-      subagentsModule.registerModelProviderExtension(providerName, providerBefore);
-      const model = { provider: providerName, id: "model" } as any;
-      assert.equal(testApi.getToolExtensionPath(toolName, []), toolBefore);
-      assert.equal(testApi.resolveModelProviderExtension(model), providerBefore);
+      subagentsModule.registerToolExtension(renewedTool, renewedToolPath);
+      subagentsModule.registerToolExtension(disabledTool, disabledToolPath);
+      subagentsModule.registerModelProviderExtension(renewedProvider, renewedProviderPath);
+      subagentsModule.registerModelProviderExtension(disabledProvider, disabledProviderPath);
 
       const shutdown = eventHandlers.get("session_shutdown")?.[0];
       assert.ok(shutdown);
-      shutdown({}, {});
-      assert.equal(testApi.getToolExtensionPath(toolName, []), undefined);
-      assert.equal(testApi.resolveModelProviderExtension(model), null);
+      shutdown({ type: "session_shutdown" }, {});
+      assert.equal(testApi.getToolExtensionPath(disabledTool, []), disabledToolPath);
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: disabledProvider, id: "model" } as any),
+        disabledProviderPath,
+      );
 
-      subagentsModule.registerToolExtension(toolName, toolAfter);
-      subagentsModule.registerModelProviderExtension(providerName, providerAfter);
-      assert.equal(testApi.getToolExtensionPath(toolName, []), toolAfter);
-      assert.equal(testApi.resolveModelProviderExtension(model), providerAfter);
+      subagentsModule.registerToolExtension(renewedTool, renewedToolPath);
+      subagentsModule.registerModelProviderExtension(renewedProvider, renewedProviderPath);
 
       const start = eventHandlers.get("session_start")?.[0];
       assert.ok(start);
-      start({}, {});
+      start({ type: "session_start", reason: "reload" }, {});
+      assert.equal(testApi.getToolExtensionPath(renewedTool, []), renewedToolPath);
+      assert.equal(testApi.getToolExtensionPath(disabledTool, []), undefined);
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: renewedProvider, id: "model" } as any),
+        renewedProviderPath,
+      );
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: disabledProvider, id: "model" } as any),
+        null,
+      );
+    });
+  });
+
+  it("preserves compatibility registrations across ordinary session switches", () => {
+    withTempDir((dir) => {
+      const toolName = `session_tool_${Date.now()}_${Math.random()}`;
+      const providerName = `session_provider_${Date.now()}_${Math.random()}`;
+      const toolPath = join(dir, "session-tool.ts");
+      const providerPath = join(dir, "session-provider.ts");
+      writeFileSync(toolPath, "export default () => {};", "utf8");
+      writeFileSync(providerPath, "export default () => {};", "utf8");
+
+      const { api, eventHandlers } = createMockExtensionApi();
+      subagentsModule.default(api as any);
+      subagentsModule.registerToolExtension(toolName, toolPath);
+      subagentsModule.registerModelProviderExtension(providerName, providerPath);
+
+      const shutdown = eventHandlers.get("session_shutdown")?.[0];
+      const start = eventHandlers.get("session_start")?.[0];
+      assert.ok(shutdown);
+      assert.ok(start);
+      shutdown({ type: "session_shutdown" }, {});
+      start({ type: "session_start", reason: "resume" }, {});
+
+      assert.equal(testApi.getToolExtensionPath(toolName, []), toolPath);
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
+        providerPath,
+      );
     });
   });
 
