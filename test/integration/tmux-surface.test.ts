@@ -163,6 +163,46 @@ for (const backend of backends) {
       assert.equal(content, marker);
     });
 
+    it("launches with the parent environment without stale subagent controls", async () => {
+      const surface = createTrackedSurface(env, "parent-environment-test");
+      const marker = uniqueId();
+      const markerFile = `/tmp/pi-tmux-parent-environment-${marker}.txt`;
+      const parentValue = `parent-${marker}`;
+      const pathComponent = `/tmp/pi-parent-path-${marker}`;
+      const originalParentValue = process.env.PI_TMUX_PARENT_ONLY;
+      const originalStaleValue = process.env.PI_SUBAGENT_STALE_ONLY;
+      const originalPath = process.env.PATH;
+      trackTempFile(env, markerFile);
+
+      try {
+        process.env.PI_TMUX_PARENT_ONLY = parentValue;
+        process.env.PI_SUBAGENT_STALE_ONLY = `stale-${marker}`;
+        process.env.PATH = `${pathComponent}:${originalPath ?? ""}`;
+
+        sendLongCommand(
+          surface,
+          `printf '%s\\n' "$PI_TMUX_PARENT_ONLY" "$PATH" "\${PI_SUBAGENT_STALE_ONLY-unset}" "$TMUX_PANE" > ${markerFile}`,
+        );
+        const content = await waitForFile(markerFile, 5_000, /unset/);
+        const [actualParentValue, actualPath, staleControl, childPane] = content.trim().split("\n");
+
+        assert.equal(actualParentValue, parentValue);
+        assert.deepEqual(actualPath?.split(":"), [
+          pathComponent,
+          ...(originalPath ?? "").split(":"),
+        ]);
+        assert.equal(staleControl, "unset");
+        assert.equal(childPane, surface);
+      } finally {
+        if (originalParentValue === undefined) delete process.env.PI_TMUX_PARENT_ONLY;
+        else process.env.PI_TMUX_PARENT_ONLY = originalParentValue;
+        if (originalStaleValue === undefined) delete process.env.PI_SUBAGENT_STALE_ONLY;
+        else process.env.PI_SUBAGENT_STALE_ONLY = originalStaleValue;
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    });
+
     it("reads screen asynchronously", async () => {
       const surface = createTrackedSurface(env, "async-read-test");
       await sleep(1000);

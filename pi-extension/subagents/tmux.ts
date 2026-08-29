@@ -18,6 +18,30 @@ import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
+const RESPAWN_ENV_EXCLUSIONS = new Set([
+  "TMUX",
+  "TMUX_PANE",
+  "PWD",
+  "OLDPWD",
+  "SHLVL",
+  "BASH_SUBSHELL",
+  "ZSH_SUBSHELL",
+  "_",
+]);
+
+function respawnEnvironmentArgs(): string[] {
+  return Object.entries(process.env).flatMap(([name, value]) => {
+    if (
+      value === undefined ||
+      RESPAWN_ENV_EXCLUSIONS.has(name) ||
+      name.startsWith("PI_SUBAGENT_")
+    ) {
+      return [];
+    }
+    return ["-e", `${name}=${value}`];
+  });
+}
+
 // ── Availability ──
 
 const commandAvailability = new Map<string, boolean>();
@@ -209,7 +233,14 @@ export function sendLongCommand(
   });
   execFileSync(
     "tmux",
-    ["respawn-pane", "-k", "-t", surface, `bash ${shellEscape(scriptPath)}`],
+    [
+      "respawn-pane",
+      "-k",
+      "-t",
+      surface,
+      ...respawnEnvironmentArgs(),
+      `bash ${shellEscape(scriptPath)}`,
+    ],
     { encoding: "utf8" },
   );
   return scriptPath;
