@@ -198,6 +198,11 @@ export function sendCommand(surface: string, command: string): void {
  * typed launch command. Keeping the pane after the script exits preserves its
  * output and completion sentinel for the parent watcher.
  *
+ * The respawn receives the parent Pi process's effective environment, except
+ * for tmux-owned and volatile shell state. The script then clears inherited
+ * `PI_SUBAGENT_*` controls so the command can establish the child's exact
+ * control values without stale session or parent settings leaking through.
+ *
  * By default the script is written to a temp directory, but callers can pass a
  * stable path (for example under session artifacts) so the exact invocation is
  * preserved for debugging.
