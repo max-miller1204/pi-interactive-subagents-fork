@@ -269,15 +269,20 @@ export function registerToolExtension(name: string, extensionPath: string): void
     COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.set(name, extensionPath);
     return;
   }
+  const priorConflict = COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.get(name);
+  if (priorConflict) throw new Error(priorConflict);
   const existing = EXTRA_TOOL_EXTENSIONS.get(name);
   if (existing === extensionPath) {
     COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.delete(name);
     return;
   }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
-    throw new Error(
-      `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
-    );
+    EXTRA_TOOL_EXTENSIONS.delete(name);
+    const error =
+      `Tool extension registration conflict for "${name}": ` +
+      `${existing} conflicts with ${extensionPath}`;
+    COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.set(name, error);
+    throw new Error(error);
   }
   EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
   COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.delete(name);
@@ -300,15 +305,20 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
     COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.set(provider, extensionPath);
     return;
   }
+  const priorConflict = COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.get(provider);
+  if (priorConflict) throw new Error(priorConflict);
   const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
   if (existing === extensionPath) {
     COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.delete(provider);
     return;
   }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
-    throw new Error(
-      `Model provider extension already registered for "${provider}": ${existing} (refusing to overwrite with ${extensionPath})`,
-    );
+    MODEL_PROVIDER_EXTENSIONS.delete(provider);
+    const error =
+      `Model provider extension registration conflict for "${provider}": ` +
+      `${existing} conflicts with ${extensionPath}`;
+    COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.set(provider, error);
+    throw new Error(error);
   }
   MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
   COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.delete(provider);
@@ -1989,6 +1999,12 @@ function reconcileCompatibilityRegistry(
     conflicts.clear();
   }
   for (const [name, extensionPath] of staged) {
+    const priorConflict = conflicts.get(name);
+    if (!allowReplacement && priorConflict) {
+      active.delete(name);
+      errors.push(priorConflict);
+      continue;
+    }
     if (!isLoadableExtensionPath(extensionPath)) {
       active.delete(name);
       const error = `Cannot reconcile ${kind} "${name}": staged extension is no longer loadable: ${extensionPath}`;

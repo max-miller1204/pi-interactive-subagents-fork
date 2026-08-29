@@ -1507,13 +1507,73 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("fails closed when registration conflicts arrive after session start", () => {
+    withTempDir((dir) => {
+      const toolName = `late_tool_${Date.now()}_${Math.random()}`;
+      const providerName = `late_provider_${Date.now()}_${Math.random()}`;
+      const toolBefore = join(dir, "late-tool-before.ts");
+      const toolAfter = join(dir, "late-tool-after.ts");
+      const providerBefore = join(dir, "late-provider-before.ts");
+      const providerAfter = join(dir, "late-provider-after.ts");
+      for (const path of [toolBefore, toolAfter, providerBefore, providerAfter]) {
+        writeFileSync(path, "export default () => {};", "utf8");
+      }
+
+      const { api, eventHandlers } = createMockExtensionApi();
+      subagentsModule.default(api as any);
+      subagentsModule.registerToolExtension(toolName, toolBefore);
+      subagentsModule.registerModelProviderExtension(providerName, providerBefore);
+      const shutdown = eventHandlers.get("session_shutdown")?.[0];
+      const start = eventHandlers.get("session_start")?.[0];
+      assert.ok(shutdown);
+      assert.ok(start);
+
+      shutdown({ type: "session_shutdown" }, {});
+      start({ type: "session_start", reason: "resume" }, {});
+      assert.throws(
+        () => subagentsModule.registerToolExtension(toolName, toolAfter),
+        /registration conflict/,
+      );
+      assert.throws(
+        () => subagentsModule.registerModelProviderExtension(providerName, providerAfter),
+        /registration conflict/,
+      );
+      assert.throws(() => testApi.getToolExtensionPath(toolName, []), /registration conflict/);
+      assert.throws(
+        () => testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
+        /registration conflict/,
+      );
+      assert.throws(
+        () => subagentsModule.registerToolExtension(toolName, toolBefore),
+        /registration conflict/,
+      );
+      assert.throws(
+        () => subagentsModule.registerModelProviderExtension(providerName, providerBefore),
+        /registration conflict/,
+      );
+
+      shutdown({ type: "session_shutdown" }, {});
+      subagentsModule.registerToolExtension(toolName, toolAfter);
+      subagentsModule.registerModelProviderExtension(providerName, providerAfter);
+      start({ type: "session_start", reason: "reload" }, {});
+      assert.equal(testApi.getToolExtensionPath(toolName, []), toolAfter);
+      assert.equal(
+        testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
+        providerAfter,
+      );
+    });
+  });
+
   it("supports explicit registration as a child-only tool fallback", () => {
     withTempDir((dir) => {
       const provider = join(dir, "child-only.ts");
       const conflictingProvider = join(dir, "conflicting.ts");
+      const staleProvider = join(dir, "stale.ts");
       writeFileSync(provider, "export default () => {};", "utf8");
       writeFileSync(conflictingProvider, "export default () => {};", "utf8");
+      writeFileSync(staleProvider, "export default () => {};", "utf8");
       const toolName = `child_only_${Date.now()}_${Math.random()}`;
+      const staleToolName = `stale_child_only_${Date.now()}_${Math.random()}`;
       subagentsModule.registerToolExtension(toolName, provider);
       subagentsModule.registerToolExtension(toolName, provider);
       assert.equal(testApi.getToolExtensionPath(toolName, []), provider);
@@ -1526,11 +1586,13 @@ describe("subagent discovery", () => {
       );
       assert.throws(
         () => subagentsModule.registerToolExtension(toolName, conflictingProvider),
-        /already registered/,
+        /registration conflict/,
       );
-      rmSync(provider);
-      subagentsModule.registerToolExtension(toolName, conflictingProvider);
-      assert.equal(testApi.getToolExtensionPath(toolName, []), conflictingProvider);
+      assert.throws(() => testApi.getToolExtensionPath(toolName, []), /registration conflict/);
+      subagentsModule.registerToolExtension(staleToolName, staleProvider);
+      rmSync(staleProvider);
+      subagentsModule.registerToolExtension(staleToolName, conflictingProvider);
+      assert.equal(testApi.getToolExtensionPath(staleToolName, []), conflictingProvider);
       assert.throws(
         () => subagentsModule.registerToolExtension(`missing_${toolName}`, join(dir, "missing.ts")),
         /absolute existing file/,
