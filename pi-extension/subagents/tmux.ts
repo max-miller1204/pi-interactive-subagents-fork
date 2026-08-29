@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
+const CLEAR_SUBAGENT_ENV = 'for name in "${!PI_SUBAGENT_@}"; do unset "$name"; done';
 
 const RESPAWN_ENV_EXCLUSIONS = new Set([
   "TMUX",
@@ -221,6 +222,7 @@ export function sendLongCommand(
   if (options?.scriptPreamble) {
     scriptParts.push(options.scriptPreamble.trimEnd());
   }
+  scriptParts.push(CLEAR_SUBAGENT_ENV);
   scriptParts.push(command);
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {

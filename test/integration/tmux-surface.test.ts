@@ -24,6 +24,7 @@ import {
   untrackSurface,
   sendCommand,
   sendLongCommand,
+  shellEscape,
   readScreen,
   readScreenAsync,
   closeSurface,
@@ -169,31 +170,79 @@ for (const backend of backends) {
       const markerFile = `/tmp/pi-tmux-parent-environment-${marker}.txt`;
       const parentValue = `parent-${marker}`;
       const pathComponent = `/tmp/pi-parent-path-${marker}`;
+      const replacementAllowed = `replacement-${marker}`;
+      const completionMarker = `complete-${marker}`;
       const originalParentValue = process.env.PI_TMUX_PARENT_ONLY;
       const originalStaleValue = process.env.PI_SUBAGENT_STALE_ONLY;
       const originalPath = process.env.PATH;
+      const session = execFileSync(
+        "tmux",
+        ["display-message", "-p", "-t", surface, "#{session_id}"],
+        { encoding: "utf8" },
+      ).trim();
+      const staleSessionControls = [
+        ["PI_SUBAGENT_AUTO_EXIT", "1"],
+        ["PI_SUBAGENT_ALLOWED", `stale-allowed-${marker}`],
+        ["PI_SUBAGENT_SURFACE", `stale-surface-${marker}`],
+      ] as const;
+      const previousSessionControls = staleSessionControls.map(([name]) => {
+        try {
+          const current = execFileSync(
+            "tmux",
+            ["show-environment", "-t", session, name],
+            { encoding: "utf8" },
+          ).trim();
+          return [name, current.slice(name.length + 1)] as const;
+        } catch {
+          return [name, undefined] as const;
+        }
+      });
       trackTempFile(env, markerFile);
 
       try {
         process.env.PI_TMUX_PARENT_ONLY = parentValue;
         process.env.PI_SUBAGENT_STALE_ONLY = `stale-${marker}`;
         process.env.PATH = `${pathComponent}:${originalPath ?? ""}`;
+        for (const [name, value] of staleSessionControls) {
+          execFileSync("tmux", ["set-environment", "-t", session, name, value]);
+        }
 
+        const innerCommand = `printf '%s\\n' "$PI_TMUX_PARENT_ONLY" "$PATH" "\${PI_SUBAGENT_STALE_ONLY-unset}" "\${PI_SUBAGENT_AUTO_EXIT-unset}" "$PI_SUBAGENT_ALLOWED" "\${PI_SUBAGENT_SURFACE-unset}" "$TMUX_PANE" "${completionMarker}" > ${markerFile}`;
         sendLongCommand(
           surface,
-          `printf '%s\\n' "$PI_TMUX_PARENT_ONLY" "$PATH" "\${PI_SUBAGENT_STALE_ONLY-unset}" "$TMUX_PANE" > ${markerFile}`,
+          `PI_SUBAGENT_ALLOWED=${replacementAllowed} bash -c ${shellEscape(innerCommand)}`,
         );
-        const content = await waitForFile(markerFile, 5_000, /unset/);
-        const [actualParentValue, actualPath, staleControl, childPane] = content.trim().split("\n");
+        const content = await waitForFile(markerFile, 5_000, new RegExp(completionMarker));
+        const [
+          actualParentValue,
+          actualPath,
+          staleParentControl,
+          staleAutoExit,
+          actualAllowed,
+          staleSurface,
+          childPane,
+          actualCompletionMarker,
+        ] = content.trim().split("\n");
 
         assert.equal(actualParentValue, parentValue);
         assert.deepEqual(actualPath?.split(":"), [
           pathComponent,
           ...(originalPath ?? "").split(":"),
         ]);
-        assert.equal(staleControl, "unset");
+        assert.equal(staleParentControl, "unset");
+        assert.equal(staleAutoExit, "unset");
+        assert.equal(actualAllowed, replacementAllowed);
+        assert.equal(staleSurface, "unset");
         assert.equal(childPane, surface);
+        assert.equal(actualCompletionMarker, completionMarker);
       } finally {
+        for (const [name, value] of previousSessionControls) {
+          if (value === undefined) {
+            execFileSync("tmux", ["set-environment", "-u", "-t", session, name]);
+          } else {
+            execFileSync("tmux", ["set-environment", "-t", session, name, value]);
+          }
+        }
         if (originalParentValue === undefined) delete process.env.PI_TMUX_PARENT_ONLY;
         else process.env.PI_TMUX_PARENT_ONLY = originalParentValue;
         if (originalStaleValue === undefined) delete process.env.PI_SUBAGENT_STALE_ONLY;
