@@ -1,0 +1,24 @@
+▶ tmux-surface [tmux]
+  ✔ keeps focus on the active surface while creating and targeting subagent surfaces (7217.640125ms)
+  ✔ creates a surface, sends a command, reads output, and closes it (2897.809625ms)
+  ✔ preserves shell special characters in echo output (2891.873667ms)
+  ✔ sends a long command via script file without truncation (3353.563583ms)
+unknown variable: PI_SUBAGENT_AUTO_EXIT
+unknown variable: PI_SUBAGENT_ALLOWED
+unknown variable: PI_SUBAGENT_SURFACE
+  ✔ launches a script even when the pane shell would consume typed input (2286.712ms)
+  ✔ launches with the parent environment without stale subagent controls (2876.0865ms)
+  ✔ reads screen asynchronously (2893.366375ms)
+  ✔ manages multiple surfaces concurrently (3674.304875ms)
+  ✔ writes output to a file and verifies via surface (1284.483084ms)
+✔ tmux-surface [tmux] (29379.083125ms)
+ℹ tests 9
+ℹ suites 1
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 29713.722042
+
+PROCESS_EXIT=0

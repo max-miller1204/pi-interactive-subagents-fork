@@ -1,0 +1,62 @@
+REPRODUCTION_RUN=1
+▶ tmux-surface [tmux]
+  ✔ launches a script even when the pane shell would consume typed input (2381.4845ms)
+✔ tmux-surface [tmux] (2382.88975ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2684.927083
+REPRODUCTION_RUN=2
+▶ tmux-surface [tmux]
+  ✔ launches a script even when the pane shell would consume typed input (2356.066625ms)
+✔ tmux-surface [tmux] (2357.6005ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2660.673916
+REPRODUCTION_RUN=3
+▶ tmux-surface [tmux]
+  ✔ launches a script even when the pane shell would consume typed input (2351.773959ms)
+✔ tmux-surface [tmux] (2353.000458ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2649.683084
+REPRODUCTION_RUN=4
+▶ tmux-surface [tmux]
+  ✔ launches a script even when the pane shell would consume typed input (2353.180916ms)
+✔ tmux-surface [tmux] (2354.871958ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2647.441666
+REPRODUCTION_RUN=5
+▶ tmux-surface [tmux]
+  ✔ launches a script even when the pane shell would consume typed input (2350.079875ms)
+✔ tmux-surface [tmux] (2351.494875ms)
+ℹ tests 1
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2650.389875
+
+PROCESS_EXIT=0

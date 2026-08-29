@@ -1,0 +1,14 @@
+Manual end-user boundary: atomic launch into an input-consuming tmux pane
+parent pane before launch: %214
+parent pane after launch:  %214
+launched child pane:       %215
+
+Values observed by the atomically launched command:
+launch marker:             atomic-script-ran
+parent-only value:         parent-visible
+PATH starts with:          /tmp/parent-path-component
+parent stale control:      unset
+session stale auto-exit:   unset
+intentional child allowed: replacement-allowed
+session stale surface:     unset
+tmux-assigned child pane:  %215
