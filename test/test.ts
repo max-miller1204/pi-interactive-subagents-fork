@@ -1479,6 +1479,8 @@ describe("subagent discovery", () => {
       assert.ok(shutdown);
       assert.ok(start);
       shutdown({ type: "session_shutdown" }, {});
+      subagentsModule.registerToolExtension(toolName, toolPath);
+      subagentsModule.registerModelProviderExtension(providerName, providerPath);
       start({ type: "session_start", reason: "resume" }, {});
 
       assert.equal(testApi.getToolExtensionPath(toolName, []), toolPath);
@@ -1486,13 +1488,21 @@ describe("subagent discovery", () => {
         testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
         providerPath,
       );
+
+      shutdown({ type: "session_shutdown" }, {});
+      subagentsModule.registerToolExtension(toolName, conflictingToolPath);
+      subagentsModule.registerModelProviderExtension(providerName, conflictingProviderPath);
       assert.throws(
-        () => subagentsModule.registerToolExtension(toolName, conflictingToolPath),
-        /already registered/,
+        () => start({ type: "session_start", reason: "fork" }, {}),
+        /ordinary session switch/,
       );
       assert.throws(
-        () => subagentsModule.registerModelProviderExtension(providerName, conflictingProviderPath),
-        /already registered/,
+        () => testApi.getToolExtensionPath(toolName, []),
+        /ordinary session switch/,
+      );
+      assert.throws(
+        () => testApi.resolveModelProviderExtension({ provider: providerName, id: "model" } as any),
+        /ordinary session switch/,
       );
     });
   });

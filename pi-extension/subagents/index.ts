@@ -212,18 +212,28 @@ interface CompatibilityRegistryLifecycle {
   pending: boolean;
   stagedTools: Map<string, string>;
   stagedProviders: Map<string, string>;
+  toolConflicts: Map<string, string>;
+  providerConflicts: Map<string, string>;
 }
 const COMPATIBILITY_REGISTRY_LIFECYCLE: CompatibilityRegistryLifecycle =
   (globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] ?? {
     pending: false,
     stagedTools: new Map<string, string>(),
     stagedProviders: new Map<string, string>(),
+    toolConflicts: new Map<string, string>(),
+    providerConflicts: new Map<string, string>(),
   };
 if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools instanceof Map)) {
   COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools = new Map<string, string>();
 }
 if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders instanceof Map)) {
   COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders = new Map<string, string>();
+}
+if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts instanceof Map)) {
+  COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts = new Map<string, string>();
+}
+if (!(COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts instanceof Map)) {
+  COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts = new Map<string, string>();
 }
 (globalThis as any)[COMPATIBILITY_REGISTRY_LIFECYCLE_KEY] = COMPATIBILITY_REGISTRY_LIFECYCLE;
 
@@ -260,13 +270,17 @@ export function registerToolExtension(name: string, extensionPath: string): void
     return;
   }
   const existing = EXTRA_TOOL_EXTENSIONS.get(name);
-  if (existing === extensionPath) return;
+  if (existing === extensionPath) {
+    COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.delete(name);
+    return;
+  }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Tool extension already registered for "${name}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
+  COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.delete(name);
 }
 
 export function registerModelProviderExtension(provider: string, extensionPath: string): void {
@@ -287,13 +301,17 @@ export function registerModelProviderExtension(provider: string, extensionPath: 
     return;
   }
   const existing = MODEL_PROVIDER_EXTENSIONS.get(provider);
-  if (existing === extensionPath) return;
+  if (existing === extensionPath) {
+    COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.delete(provider);
+    return;
+  }
   if (existing !== undefined && isLoadableExtensionPath(existing)) {
     throw new Error(
       `Model provider extension already registered for "${provider}": ${existing} (refusing to overwrite with ${extensionPath})`,
     );
   }
   MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
+  COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.delete(provider);
 }
 
 // Compatibility hook for extensions that explicitly register child-only tools.
@@ -307,6 +325,8 @@ type PiModel = NonNullable<ExtensionContext["model"]>;
 
 function resolveModelProviderExtension(model: PiModel): string | null {
   const provider = model.provider;
+  const conflict = COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts.get(provider);
+  if (conflict) throw new Error(conflict);
   const extensionPath = MODEL_PROVIDER_EXTENSIONS.get(provider);
   if (extensionPath === undefined) return null;
   if (!isLoadableExtensionPath(extensionPath)) {
@@ -372,6 +392,8 @@ function getToolExtensionPath(
   }
 
   const registered = EXTRA_TOOL_EXTENSIONS.get(tool);
+  const conflict = COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts.get(tool);
+  if (conflict) throw new Error(conflict);
   if (isLoadableExtensionPath(registered)) return registered;
 
   // Deprecated compatibility for the original pi-config extension layout.
@@ -1954,21 +1976,70 @@ async function watchSubagent(
   }
 }
 
+function reconcileCompatibilityRegistry(
+  active: Map<string, string>,
+  staged: Map<string, string>,
+  conflicts: Map<string, string>,
+  kind: string,
+  allowReplacement: boolean,
+): string[] {
+  const errors: string[] = [];
+  if (allowReplacement) {
+    active.clear();
+    conflicts.clear();
+  }
+  for (const [name, extensionPath] of staged) {
+    if (!isLoadableExtensionPath(extensionPath)) {
+      active.delete(name);
+      const error = `Cannot reconcile ${kind} "${name}": staged extension is no longer loadable: ${extensionPath}`;
+      conflicts.set(name, error);
+      errors.push(error);
+      continue;
+    }
+    const existing = active.get(name);
+    if (
+      allowReplacement ||
+      existing === undefined ||
+      existing === extensionPath ||
+      !isLoadableExtensionPath(existing)
+    ) {
+      active.set(name, extensionPath);
+      conflicts.delete(name);
+      continue;
+    }
+    active.delete(name);
+    const error =
+      `Cannot reconcile ${kind} "${name}" across an ordinary session switch: ` +
+      `${existing} conflicts with ${extensionPath}`;
+    conflicts.set(name, error);
+    errors.push(error);
+  }
+  return errors;
+}
+
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
   // Capture the UI context for widget updates
   pi.on("session_start", (event, ctx) => {
+    const lifecycleErrors: string[] = [];
     if (COMPATIBILITY_REGISTRY_LIFECYCLE.pending) {
-      if (event.reason === "reload") {
-        EXTRA_TOOL_EXTENSIONS.clear();
-        for (const [name, extensionPath] of COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools) {
-          EXTRA_TOOL_EXTENSIONS.set(name, extensionPath);
-        }
-        MODEL_PROVIDER_EXTENSIONS.clear();
-        for (const [provider, extensionPath] of COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders) {
-          MODEL_PROVIDER_EXTENSIONS.set(provider, extensionPath);
-        }
-      }
+      const allowReplacement = event.reason === "reload";
+      lifecycleErrors.push(
+        ...reconcileCompatibilityRegistry(
+          EXTRA_TOOL_EXTENSIONS,
+          COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools,
+          COMPATIBILITY_REGISTRY_LIFECYCLE.toolConflicts,
+          "tool extension",
+          allowReplacement,
+        ),
+        ...reconcileCompatibilityRegistry(
+          MODEL_PROVIDER_EXTENSIONS,
+          COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders,
+          COMPATIBILITY_REGISTRY_LIFECYCLE.providerConflicts,
+          "model provider extension",
+          allowReplacement,
+        ),
+      );
       COMPATIBILITY_REGISTRY_LIFECYCLE.pending = false;
       COMPATIBILITY_REGISTRY_LIFECYCLE.stagedTools.clear();
       COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.clear();
@@ -1981,6 +2052,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     const prevAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
     if (!prevAbort || prevAbort.signal.aborted) {
       (globalThis as any)[POLL_ABORT_KEY] = new AbortController();
+    }
+    if (lifecycleErrors.length > 0) {
+      throw new Error(lifecycleErrors.join("; "));
     }
   });
 
