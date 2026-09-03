@@ -31,6 +31,7 @@ import {
   readScreen,
   readScreenAsync,
   closeSurface,
+  pollForExit,
   shellEscape,
 } from "../../pi-extension/subagents/tmux.ts";
 
@@ -43,6 +44,7 @@ export {
   readScreen,
   readScreenAsync,
   closeSurface,
+  pollForExit,
   shellEscape,
 };
 

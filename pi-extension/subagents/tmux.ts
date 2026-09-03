@@ -269,12 +269,25 @@ export function readScreen(surface: string, lines = 50): string {
 
 /**
  * Read the screen contents of a pane (async).
+ * `joinWrapped` asks tmux to reconstruct logical lines split by pane width.
  */
-export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
+export async function readScreenAsync(
+  surface: string,
+  lines = 50,
+  options?: { joinWrapped?: boolean },
+): Promise<string> {
   requireTmux();
   const { stdout } = await execFileAsync(
     "tmux",
-    ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
+    [
+      "capture-pane",
+      "-p",
+      ...(options?.joinWrapped ? ["-J"] : []),
+      "-t",
+      surface,
+      "-S",
+      `-${Math.max(1, lines)}`,
+    ],
     { encoding: "utf8" },
   );
   return stdout;
@@ -365,9 +378,13 @@ export async function pollForExit(
       } catch {}
     }
 
-    // Slow path: read terminal screen for sentinel (crash detection)
+    // Slow path: read terminal screen for sentinel (crash detection).
+    // -J joins tmux's soft-wrapped rows. Without it, narrow panes split the
+    // sentinel across lines and completion remains invisible until a resize
+    // reflows the pane wide enough to put the marker back on one line. Capture
+    // enough physical rows for the full marker even at tmux's one-column limit.
     try {
-      const screen = await readScreenAsync(surface, 5);
+      const screen = await readScreenAsync(surface, 50, { joinWrapped: true });
       const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
