@@ -1,0 +1,5 @@
+pane=%166 dimensions=1x2
+ordinary_capture_contains_complete_marker=false
+ordinary_capture_rows=["_","_","S","U","B","A","G","E","N","T","_","D","O","N","E","_","0","_","_","P"]
+poll_result={"reason":"sentinel","exitCode":0} elapsed_ms=118 resize_performed=false
+cleanup_complete=true session_exists=false

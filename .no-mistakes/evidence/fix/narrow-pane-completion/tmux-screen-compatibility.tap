@@ -1,0 +1,13 @@
+▶ tmux-surface [tmux]
+  ✔ creates a surface, sends a command, reads output, and closes it (3357.384333ms)
+  ✔ reads screen asynchronously (3193.202125ms)
+  ✔ detects a completion sentinel at tmux's one-column pane limit (922.699833ms)
+✔ tmux-surface [tmux] (7475.443334ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7574.83425

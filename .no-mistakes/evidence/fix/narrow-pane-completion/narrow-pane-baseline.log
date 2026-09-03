@@ -1,0 +1,3 @@
+baseline_ordinary_capture_contains_complete_marker=false
+baseline_poll_timed_out=true elapsed_ms=825
+baseline_reproduces_reported_stuck_pane=true
