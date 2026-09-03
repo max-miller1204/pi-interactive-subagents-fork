@@ -28,6 +28,7 @@ import {
   readScreen,
   readScreenAsync,
   closeSurface,
+  pollForExit,
   sleep,
   uniqueId,
   trackTempFile,
@@ -265,6 +266,39 @@ for (const backend of backends) {
         screen.replace(/\s+/g, "").includes(`ASYNC_${marker}`),
         `Async read should find marker. Got:\n${screen}`,
       );
+    });
+
+    it("detects a completion sentinel at tmux's one-column pane limit", async () => {
+      const session = `pi-wrap-${uniqueId()}`;
+      let surface = "";
+
+      try {
+        surface = execFileSync(
+          "tmux",
+          ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-x", "1", "-y", "2"],
+          { encoding: "utf8" },
+        ).trim();
+        execFileSync("tmux", ["set-option", "-t", session, "remain-on-exit", "on"]);
+        execFileSync(
+          "tmux",
+          ["respawn-pane", "-k", "-t", surface, `printf '%s\\n' '__SUBAGENT_DONE_0__'`],
+        );
+        await sleep(200);
+
+        const unjoinedScreen = readScreen(surface, 5);
+        assert.doesNotMatch(
+          unjoinedScreen,
+          /__SUBAGENT_DONE_0__/,
+          `Test requires the sentinel to wrap at one column. Got:\n${unjoinedScreen}`,
+        );
+
+        const result = await pollForExit(surface, AbortSignal.timeout(5_000), { interval: 50 });
+        assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+      } finally {
+        try {
+          execFileSync("tmux", ["kill-session", "-t", session]);
+        } catch {}
+      }
     });
 
     it("manages multiple surfaces concurrently", async () => {
