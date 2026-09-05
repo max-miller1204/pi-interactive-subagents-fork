@@ -27,6 +27,9 @@ export default function (pi: ExtensionAPI) {
       .map((command) => command.name)
       .sort();
     console.log(`SANDBOX_SKILLS=${skills.join(",")}`);
+    if (process.env.PI_TEST_REPORT_SKILL_COMMANDS) {
+      console.log(`SANDBOX_SKILL_COMMANDS=${JSON.stringify(commands.filter((command) => command.source === "skill"))}`);
+    }
     return { action: "handled" as const };
   });
 }

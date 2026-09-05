@@ -15,6 +15,52 @@ const controlExtension = fileURLToPath(
 );
 
 describe("restricted tool-extension sandbox", () => {
+  it("pins Pi's winning skill file when directory resources contain duplicate names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-skill-precedence-"));
+    try {
+      const roots = [join(dir, "first"), join(dir, "second")];
+      for (const root of roots) {
+        const skillDir = join(root, "nested");
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(
+          join(skillDir, "SKILL.md"),
+          "---\nname: duplicate-skill\ndescription: Test skill precedence.\n---\nUse this skill.\n",
+        );
+      }
+      const result = spawnSync("pi", [
+        "--print", "--offline", "--no-session", "--no-extensions", "--no-skills",
+        "--model", "openai-codex/gpt-5.3-codex-spark",
+        "--tools", "allowed_tool", "-e", fixtureProvider,
+        "--skill", roots[0], "--skill", roots[1], "inspect",
+      ], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          PI_CODING_AGENT_DIR: join(dir, "agent"),
+          PI_TEST_REPORT_SKILL_COMMANDS: "1",
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.status, 0, `pi failed:\n${output}`);
+      const prefix = "SANDBOX_SKILL_COMMANDS=";
+      const line = output.split(/\r?\n/).find((line) => line.startsWith(prefix));
+      assert.ok(line, output);
+      const commands = JSON.parse(line.slice(prefix.length));
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0].name, "skill:duplicate-skill");
+      const winningPath = join(roots[0], "nested", "SKILL.md");
+      assert.equal(commands[0].sourceInfo.path, winningPath);
+      const sandbox = subagentTestApi.resolveSkillSandbox(
+        "allowlist", undefined, ["duplicate-skill"], commands,
+      );
+      assert.deepEqual({ ...sandbox.skillPaths }, { "duplicate-skill": winningPath });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   for (const skillPolicy of ["none", "allowlist"] as const) {
     it(`permits trusted extension skill contributions with ${skillPolicy}`, () => {
       const dir = mkdtempSync(join(tmpdir(), "pi-extension-skill-"));
