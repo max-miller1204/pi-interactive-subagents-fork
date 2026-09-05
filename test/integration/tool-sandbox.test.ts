@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { __test__ as subagentTestApi } from "../../pi-extension/subagents/index.ts";
 import { shellEscape } from "../../pi-extension/subagents/tmux.ts";
+import { PI_EXECUTABLE } from "./harness.ts";
 import type { SubagentLoadout } from "../../pi-extension/subagents/session.ts";
 
 const fixtureProvider = fileURLToPath(new URL("./fixtures/tool-provider.ts", import.meta.url));
@@ -27,7 +28,7 @@ describe("restricted tool-extension sandbox", () => {
           "---\nname: duplicate-skill\ndescription: Test skill precedence.\n---\nUse this skill.\n",
         );
       }
-      const result = spawnSync("pi", [
+      const result = spawnSync(PI_EXECUTABLE, [
         "--print", "--offline", "--no-session", "--no-extensions", "--no-skills",
         "--model", "openai-codex/gpt-5.3-codex-spark",
         "--tools", "allowed_tool", "-e", fixtureProvider,
@@ -92,7 +93,7 @@ describe("restricted tool-extension sandbox", () => {
           cwd: dir,
           agentDir: join(dir, "agent"),
         };
-        const parts = ["pi", "--print", "--offline", "--no-session"];
+        const parts = [shellEscape(PI_EXECUTABLE), "--print", "--offline", "--no-session"];
         subagentTestApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "integration" });
         parts.push(shellEscape("inspect"));
         const result = spawnSync("sh", ["-lc", parts.join(" ")], {
@@ -151,7 +152,7 @@ describe("restricted tool-extension sandbox", () => {
         cwd: dir,
         agentDir,
       };
-      const parts = ["pi", "--print", "--offline", "--no-session"];
+      const parts = [shellEscape(PI_EXECUTABLE), "--print", "--offline", "--no-session"];
       subagentTestApi.applySandboxToParts(parts, loadout, {
         artifactDir: dir,
         name: "integration",
@@ -227,7 +228,7 @@ describe("restricted tool-extension sandbox", () => {
         cwd: dir,
         agentDir,
       };
-      const parts = ["pi", "--print", "--offline", "--no-session"];
+      const parts = [shellEscape(PI_EXECUTABLE), "--print", "--offline", "--no-session"];
       subagentTestApi.applySandboxToParts(parts, loadout, {
         artifactDir: dir,
         name: "integration",

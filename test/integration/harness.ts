@@ -17,9 +17,10 @@ import {
   rmSync,
   existsSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
 } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { basename, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
@@ -52,7 +53,11 @@ export {
 
 const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HARNESS_DIR, "../..");
+const PROJECT_BIN_DIR = join(PROJECT_ROOT, "node_modules", ".bin");
 const TEST_AGENTS_SRC = join(HARNESS_DIR, "agents");
+
+/** Repository-local Pi CLI used by all integration tests. */
+export const PI_EXECUTABLE = join(PROJECT_BIN_DIR, "pi");
 
 /**
  * Absolute path to the extension source in the working tree.
@@ -124,8 +129,33 @@ export interface TestEnv {
   dir: string;
   /** Panes created during the test (cleaned up automatically) */
   surfaces: string[];
+  /** Unique title marker used by Pi panes in this test environment */
+  paneMarker: string;
   /** Temp files to clean up */
   tempFiles: string[];
+}
+
+interface PaneRecord {
+  id: string;
+  title: string;
+  cwd: string;
+}
+
+function listPanes(): PaneRecord[] {
+  try {
+    const output = execFileSync(
+      "tmux",
+      ["list-panes", "-a", "-F", "#{pane_id}\t#{pane_title}\t#{pane_current_path}"],
+      { encoding: "utf8" },
+    ).trim();
+    if (!output) return [];
+    return output.split("\n").flatMap((line) => {
+      const [id, title, cwd] = line.split("\t");
+      return id ? [{ id, title: title ?? "", cwd: cwd ?? "" }] : [];
+    });
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -133,7 +163,7 @@ export interface TestEnv {
  * The temp dir has `.pi/agents/` containing copies of all test agents.
  */
 export function createTestEnv(): TestEnv {
-  const dir = mkdtempSync(join(tmpdir(), "pi-integ-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pi-integ-")));
   const agentsDir = join(dir, ".pi", "agents");
   mkdirSync(agentsDir, { recursive: true });
 
@@ -146,16 +176,28 @@ export function createTestEnv(): TestEnv {
     }
   }
 
-  return { dir, surfaces: [], tempFiles: [] };
+  return {
+    dir,
+    surfaces: [],
+    paneMarker: basename(dir),
+    tempFiles: [],
+  };
 }
 
 /**
  * Clean up all resources created during the test.
  */
 export function cleanupTestEnv(env: TestEnv): void {
-  for (const surface of env.surfaces) {
+  const tracked = new Set(env.surfaces);
+  for (const pane of listPanes()) {
+    const belongsToTest =
+      tracked.has(pane.id) ||
+      pane.title.includes(env.paneMarker) ||
+      pane.cwd === env.dir ||
+      pane.cwd.startsWith(`${env.dir}/`);
+    if (!belongsToTest) continue;
     try {
-      closeSurface(surface);
+      closeSurface(pane.id);
     } catch {}
   }
   for (const file of env.tempFiles) {
@@ -219,7 +261,9 @@ export function startPi(
   // against whatever version is checked out under `~/.pi/agent/git/...`.
   const cmd = [
     `cd ${shellEscape(testDir)} &&`,
-    `pi`,
+    // Use an absolute executable for this launch. Put the same executable first
+    // on PATH so subagents that run `pi` inherit the selected CLI.
+    `PATH=${shellEscape(PROJECT_BIN_DIR)}:"$PATH" ${shellEscape(PI_EXECUTABLE)}`,
     `-ne`,
     `-e ${shellEscape(EXTENSION_SOURCE)}`,
     model ? `--model ${shellEscape(model)}` : "",
