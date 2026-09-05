@@ -39,7 +39,7 @@ describe("restricted tool-extension sandbox", () => {
         toolExtensions: { allowed_tool: fixtureProvider },
         controlExtension,
         nativeTools: [],
-        model: "anthropic/claude-sonnet-4-5",
+        model: "openai-codex/gpt-5.3-codex-spark",
         modelProviderExtension: null,
         thinking: null,
         systemPromptMode: null,
@@ -67,6 +67,80 @@ describe("restricted tool-extension sandbox", () => {
       assert.match(result.stdout, /SANDBOX_ACTIVE=allowed_tool(?:\r?\n|$)/);
       assert.doesNotMatch(result.stdout, /other_tool/);
       assert.equal(existsSync(blockedMarker), false, "global extension discovery must stay disabled");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads only pinned skills when the skill policy is allowlist", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-skill-sandbox-"));
+    try {
+      const agentDir = join(dir, "agent");
+      const allowedSkill = join(dir, "allowed", "SKILL.md");
+      const blockedSkill = join(agentDir, "skills", "blocked-skill", "SKILL.md");
+      mkdirSync(dirname(allowedSkill), { recursive: true });
+      mkdirSync(dirname(blockedSkill), { recursive: true });
+      writeFileSync(
+        allowedSkill,
+        [
+          "---",
+          "name: allowed-skill",
+          "description: Allowed integration test skill.",
+          "---",
+          "",
+          "Use the allowed skill.",
+        ].join("\n"),
+        "utf8",
+      );
+      writeFileSync(
+        blockedSkill,
+        [
+          "---",
+          "name: blocked-skill",
+          "description: Blocked integration test skill.",
+          "---",
+          "",
+          "Do not load this skill.",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const loadout: SubagentLoadout = {
+        version: 3,
+        agent: "integration",
+        toolAllowlist: "allowed_tool",
+        toolExtensions: { allowed_tool: fixtureProvider },
+        controlExtension,
+        nativeTools: [],
+        model: "openai-codex/gpt-5.3-codex-spark",
+        modelProviderExtension: null,
+        skillPolicy: "allowlist",
+        skillPaths: { "allowed-skill": allowedSkill },
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: dir,
+        agentDir,
+      };
+      const parts = ["pi", "--print", "--offline", "--no-session"];
+      subagentTestApi.applySandboxToParts(parts, loadout, {
+        artifactDir: dir,
+        name: "integration",
+      });
+      parts.push(shellEscape("inspect"));
+
+      const result = spawnSync("sh", ["-lc", parts.join(" ")], {
+        cwd: dir,
+        env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+
+      assert.equal(result.status, 0, `pi failed:\n${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, /SANDBOX_SKILLS=skill:allowed-skill(?:\r?\n|$)/);
+      assert.doesNotMatch(result.stdout, /blocked-skill/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

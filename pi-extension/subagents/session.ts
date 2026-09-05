@@ -86,8 +86,8 @@ export function seedSubagentSessionFile(params: {
  *
  * Written next to the session file as `<sessionFile>.loadout.json` at spawn
  * time. Resume replays this exact snapshot so the reincarnated process gets the
- * same `--no-extensions` + `--tools` restriction, exact backing extension
- * paths, model, identity, spawn whitelist, cwd, and config dir it originally
+ * same skill, extension, and tool restrictions, exact backing resource paths,
+ * model, identity, spawn whitelist, cwd, and config dir it originally
  * ran with — instead of falling back to pi's default (all global extensions +
  * full toolset). Storing the resolved loadout (rather than re-deriving from the
  * agent `.md` by name) keeps
@@ -95,7 +95,7 @@ export function seedSubagentSessionFile(params: {
  * deleted.
  */
 export interface SubagentLoadout {
-  /** Snapshot schema. Version 3 pins all executable extension paths for exact replay. */
+  /** Snapshot schema. Version 3 supports pinned extension and skill paths. */
   version: 3;
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
@@ -109,6 +109,10 @@ export interface SubagentLoadout {
   /** Exact model id (without thinking suffix) used by the child. */
   model: string;
   modelProviderExtension: string | null;
+  /** Skill discovery policy. Missing means the legacy `all` policy. */
+  skillPolicy?: "all" | "allowlist" | "none";
+  /** Exact skill files loaded for the `allowlist` policy. */
+  skillPaths?: Record<string, string>;
   /** Thinking level appended to the model as `model:level`, or null. */
   thinking: string | null;
   /** How the identity text was applied: append/replace, or null. */
@@ -167,6 +171,18 @@ function isSubagentLoadout(value: unknown): value is SubagentLoadout {
     return false;
   }
   if (!Object.values(toolExtensions).every((path) => typeof path === "string")) return false;
+
+  const skillPolicy = loadout.skillPolicy ?? "all";
+  if (skillPolicy !== "all" && skillPolicy !== "allowlist" && skillPolicy !== "none") return false;
+  const skillPaths = loadout.skillPaths ?? {};
+  if (!skillPaths || typeof skillPaths !== "object" || Array.isArray(skillPaths)) return false;
+  for (const [skill, skillPath] of Object.entries(skillPaths)) {
+    if (!/^[a-z0-9-]{1,64}$/.test(skill)) return false;
+    if (!isNonEmptyAbsolutePath(skillPath)) return false;
+  }
+  if (skillPolicy === "allowlist" && Object.keys(skillPaths).length === 0) return false;
+  if (skillPolicy !== "allowlist" && Object.keys(skillPaths).length > 0) return false;
+
   if (
     !Array.isArray(loadout.nativeTools) ||
     !loadout.nativeTools.every((tool) => typeof tool === "string" && tool.trim().length > 0) ||
