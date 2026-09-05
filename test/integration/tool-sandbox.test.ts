@@ -64,8 +64,9 @@ describe("restricted tool-extension sandbox", () => {
       });
 
       assert.equal(result.status, 0, `pi failed:\n${result.stdout}\n${result.stderr}`);
-      assert.match(result.stdout, /SANDBOX_ACTIVE=allowed_tool(?:\r?\n|$)/);
-      assert.doesNotMatch(result.stdout, /other_tool/);
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.match(output, /SANDBOX_ACTIVE=allowed_tool(?:\r?\n|$)/);
+      assert.doesNotMatch(output, /other_tool/);
       assert.equal(existsSync(blockedMarker), false, "global extension discovery must stay disabled");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -139,8 +140,9 @@ describe("restricted tool-extension sandbox", () => {
       });
 
       assert.equal(result.status, 0, `pi failed:\n${result.stdout}\n${result.stderr}`);
-      assert.match(result.stdout, /SANDBOX_SKILLS=skill:allowed-skill(?:\r?\n|$)/);
-      assert.doesNotMatch(result.stdout, /blocked-skill/);
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.match(output, /SANDBOX_SKILLS=skill:allowed-skill(?:\r?\n|$)/);
+      assert.doesNotMatch(output, /blocked-skill/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
