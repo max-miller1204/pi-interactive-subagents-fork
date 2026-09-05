@@ -13,8 +13,9 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test test/test.ts",
-    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts"
+    "check:pi-versions": "node scripts/check-pi-versions.mjs",
+    "test": "npm run check:pi-versions && node scripts/run-tests.mjs --test test/test.ts",
+    "test:integration": "npm run check:pi-versions && node scripts/run-tests.mjs --test --test-concurrency=1 test/integration/*.test.ts"
   },
   "pi": {
     "extensions": [

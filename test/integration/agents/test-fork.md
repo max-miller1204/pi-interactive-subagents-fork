@@ -1,10 +1,11 @@
 ---
-name: test-echo
-description: Integration test agent — completes simple file-writing tasks
+name: test-fork
+description: Integration test agent — inherits the parent conversation context
 model: openai-codex/gpt-5.6-luna
 tools: read, bash, write, edit
 spawning: false
 auto-exit: true
+session-mode: fork
 disable-model-invocation: true
 ---
 

@@ -11,7 +11,9 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { unlinkSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -34,10 +36,15 @@ import {
   trackTempFile,
   waitForFile,
   waitForScreen,
+  startPi,
+  PI_EXECUTABLE,
   type TestEnv,
 } from "./harness.ts";
 
 const backends = getAvailableBackends();
+const REPORT_PI_VERSION_EXTENSION = fileURLToPath(
+  new URL("./fixtures/report-pi-version.ts", import.meta.url),
+);
 const FOCUS_TEST_PANE_STARTUP_MS = 2500;
 
 if (backends.length === 0) {
@@ -101,6 +108,58 @@ for (const backend of backends) {
 
       closeSurface(surface);
       untrackSurface(env, surface);
+    });
+
+    it("cleans untracked child panes in the tracked test window", () => {
+      const parent = createTrackedSurface(env, "cleanup-parent");
+      const child = execFileSync(
+        "tmux",
+        ["split-window", "-d", "-t", parent, "-c", env.dir, "-P", "-F", "#{pane_id}"],
+        { encoding: "utf8" },
+      ).trim();
+
+      cleanupTestEnv(env);
+
+      const remainingPanes = new Set(
+        execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_id}"], {
+          encoding: "utf8",
+        })
+          .trim()
+          .split("\n"),
+      );
+      assert.equal(remainingPanes.has(parent), false);
+      assert.equal(remainingPanes.has(child), false);
+    });
+
+    it("cleans child panes created while the parent closes", () => {
+      const anchor = execFileSync(
+        "tmux",
+        ["new-window", "-d", "-P", "-F", "#{pane_id}"],
+        { encoding: "utf8" },
+      ).trim();
+      try {
+        const parent = execFileSync(
+          "tmux",
+          ["split-window", "-d", "-t", anchor, "-P", "-F", "#{pane_id}"],
+          { encoding: "utf8" },
+        ).trim();
+        env.surfaces.push(parent);
+        // Complete a pending child split when cleanup closes the parent.
+        execFileSync("tmux", [
+          "set-hook", "-t", anchor, "after-kill-pane",
+          `set-hook -u -t ${anchor} after-kill-pane ; split-window -d -t ${anchor} -c ${shellEscape(env.dir)}`,
+        ]);
+
+        cleanupTestEnv(env);
+
+        const remainingPanes = execFileSync(
+          "tmux", ["list-panes", "-t", anchor, "-F", "#{pane_id}"],
+          { encoding: "utf8" },
+        ).trim().split("\n");
+        assert.deepEqual(remainingPanes, [anchor]);
+      } finally {
+        execFileSync("tmux", ["kill-window", "-t", anchor]);
+      }
     });
 
     it("preserves shell special characters in echo output", async () => {
@@ -170,7 +229,8 @@ for (const backend of backends) {
       const marker = uniqueId();
       const markerFile = `/tmp/pi-tmux-parent-environment-${marker}.txt`;
       const parentValue = `parent-${marker}`;
-      const pathComponent = `/tmp/pi-parent-path-${marker}`;
+      const pathComponent = join(env.dir, `parent-path-${marker}`);
+      const expectedPiExecutable = join(pathComponent, "pi");
       const replacementAllowed = `replacement-${marker}`;
       const completionMarker = `complete-${marker}`;
       const originalParentValue = process.env.PI_TMUX_PARENT_ONLY;
@@ -199,6 +259,10 @@ for (const backend of backends) {
         }
       });
       trackTempFile(env, markerFile);
+      mkdirSync(pathComponent);
+      writeFileSync(expectedPiExecutable, "#!/bin/sh\nprintf 'parent-path-pi\\n'\n", {
+        mode: 0o755,
+      });
 
       try {
         process.env.PI_TMUX_PARENT_ONLY = parentValue;
@@ -208,7 +272,7 @@ for (const backend of backends) {
           execFileSync("tmux", ["set-environment", "-t", session, name, value]);
         }
 
-        const innerCommand = `printf '%s\\n' "$PI_TMUX_PARENT_ONLY" "$PATH" "\${PI_SUBAGENT_STALE_ONLY-unset}" "\${PI_SUBAGENT_AUTO_EXIT-unset}" "$PI_SUBAGENT_ALLOWED" "\${PI_SUBAGENT_SURFACE-unset}" "$TMUX_PANE" "${completionMarker}" > ${markerFile}`;
+        const innerCommand = `printf '%s\\n' "$PI_TMUX_PARENT_ONLY" "$PATH" "$(command -v pi)" "\${PI_SUBAGENT_STALE_ONLY-unset}" "\${PI_SUBAGENT_AUTO_EXIT-unset}" "$PI_SUBAGENT_ALLOWED" "\${PI_SUBAGENT_SURFACE-unset}" "$TMUX_PANE" "${completionMarker}" > ${markerFile}`;
         sendLongCommand(
           surface,
           `PI_SUBAGENT_ALLOWED=${replacementAllowed} bash -c ${shellEscape(innerCommand)}`,
@@ -217,6 +281,7 @@ for (const backend of backends) {
         const [
           actualParentValue,
           actualPath,
+          actualPiExecutable,
           staleParentControl,
           staleAutoExit,
           actualAllowed,
@@ -226,10 +291,10 @@ for (const backend of backends) {
         ] = content.trim().split("\n");
 
         assert.equal(actualParentValue, parentValue);
-        assert.deepEqual(actualPath?.split(":"), [
-          pathComponent,
-          ...(originalPath ?? "").split(":"),
-        ]);
+        const actualPathComponents = actualPath?.split(":") ?? [];
+        const expectedPathComponents = [pathComponent, ...(originalPath ?? "").split(":")];
+        assert.deepEqual(actualPathComponents.toSorted(), expectedPathComponents.toSorted());
+        assert.equal(actualPiExecutable, expectedPiExecutable);
         assert.equal(staleParentControl, "unset");
         assert.equal(staleAutoExit, "unset");
         assert.equal(actualAllowed, replacementAllowed);
@@ -250,6 +315,41 @@ for (const backend of backends) {
         else process.env.PI_SUBAGENT_STALE_ONLY = originalStaleValue;
         if (originalPath === undefined) delete process.env.PATH;
         else process.env.PATH = originalPath;
+      }
+    });
+
+    it("keeps the repository Pi selected for child launches", async () => {
+      const surface = createTrackedSurface(env, "pi-selection-test");
+      const fakeBinDir = join(env.dir, "fake-bin");
+      const markerFile = join(env.dir, "pi-selection.json");
+      const previousPath = process.env.PATH;
+      const previousReportPath = process.env.PI_TEST_REPORT_PI_EXECUTABLE;
+      mkdirSync(fakeBinDir);
+      writeFileSync(join(fakeBinDir, "pi"), "#!/bin/sh\nprintf '99.99.99\\n'\n", {
+        mode: 0o755,
+      });
+
+      try {
+        process.env.PATH = `${fakeBinDir}:${previousPath ?? ""}`;
+        process.env.PI_TEST_REPORT_PI_EXECUTABLE = markerFile;
+        startPi(surface, env.dir, "report the selected Pi", {
+          extraArgs:
+            `--print --offline --no-session -e ${shellEscape(REPORT_PI_VERSION_EXTENSION)}`,
+        });
+
+        const report = JSON.parse(await waitForFile(markerFile, 15_000));
+        const expectedVersion = execFileSync(PI_EXECUTABLE, ["--version"], {
+          encoding: "utf8",
+        }).trim();
+        assert.deepEqual(report, {
+          executable: PI_EXECUTABLE,
+          version: expectedVersion,
+        });
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        if (previousReportPath === undefined) delete process.env.PI_TEST_REPORT_PI_EXECUTABLE;
+        else process.env.PI_TEST_REPORT_PI_EXECUTABLE = previousReportPath;
       }
     });
 

@@ -15,7 +15,7 @@
  *   PI_TEST_MODEL     — optional model override; the Pi default is used when omitted
  *   PI_TEST_TIMEOUT   — per-test timeout in ms (default: 120000)
  */
-import { describe, it, before, after } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import {
@@ -45,11 +45,11 @@ for (const backend of backends) {
   describe(`subagent-lifecycle [${backend}]`, { timeout: PI_TIMEOUT * 3 }, () => {
     let env: TestEnv;
 
-    before(() => {
+    beforeEach(() => {
       env = createTestEnv();
     });
 
-    after(() => {
+    afterEach(() => {
       cleanupTestEnv(env);
     });
 
@@ -201,41 +201,57 @@ for (const backend of backends) {
       const task = [
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Fork-${id}"`,
-        `  fork: true`,
-        `  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-        `Do not set the agent parameter. Just set name, fork, and task.`,
+        `  agent: "test-fork"`,
+        `  task: "Run this bash command: echo \"$PI_SUBAGENT_SESSION\" > '${markerFile}'"`,
+        `Do not set a fork parameter. The test-fork agent profile enables fork mode.`,
         `After you receive the result, say FORK_COMPLETE.`,
       ].join("\n");
 
       startPi(surface, env.dir, task);
 
-      // Verify: forked subagent created the file
-      const content = await waitForFile(markerFile, PI_TIMEOUT, /FORK_OK/);
-      assert.ok(content.includes(`FORK_OK_${id}`), `Fork marker file should exist with content`);
+      // The child reports its session path through the launch environment.
+      const sessionFile = (await waitForFile(markerFile, PI_TIMEOUT, /\.jsonl\s*$/)).trim();
+      assert.ok(existsSync(sessionFile), `Fork session file should exist: ${sessionFile}`);
 
-      // Wait for the outer pi to show the result
-      const screen = await waitForScreen(
-        surface,
-        /FORK_COMPLETE|completed|Sub-agent.*"Fork/i,
-        PI_TIMEOUT,
+      await waitForScreen(surface, /FORK_COMPLETE|completed|Sub-agent.*"Fork/i, PI_TIMEOUT);
+
+      const entries = readFileSync(sessionFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const header = entries[0];
+      assert.equal(header.type, "session", "First entry should be session header");
+      assert.equal(typeof header.parentSession, "string");
+      const parentSessionFile = header.parentSession as string;
+      assert.notEqual(parentSessionFile, sessionFile);
+      assert.ok(
+        existsSync(parentSessionFile),
+        `Parent session file should exist: ${parentSessionFile}`,
       );
 
-      // Verify: the forked session has a parent link
-      const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
-      if (sessionMatch) {
-        const sessionFile = sessionMatch[1];
-        assert.ok(existsSync(sessionFile), `Fork session file should exist: ${sessionFile}`);
-
-        const entries = readFileSync(sessionFile, "utf8")
-          .trim()
-          .split("\n")
-          .map((l) => JSON.parse(l));
-        const header = entries[0];
-        assert.equal(header.type, "session", "First entry should be session header");
-        assert.ok(header.parentSession, "Fork session should have parentSession field");
-        // Fork sessions include parent context (model_change entries etc.)
-        assert.ok(entries.length >= 2, "Fork session should have context entries beyond header");
+      const parentEntries = readFileSync(parentSessionFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      let truncateAt = parentEntries.length;
+      for (let index = parentEntries.length - 1; index >= 0; index--) {
+        if (
+          parentEntries[index].type === "message" &&
+          parentEntries[index].message?.role === "user"
+        ) {
+          truncateAt = index;
+          break;
+        }
       }
+      const expectedForkContext = parentEntries
+        .slice(0, truncateAt)
+        .filter((entry) => entry.type !== "session");
+      assert.ok(expectedForkContext.length > 0, "Parent session should provide fork context");
+      assert.deepEqual(
+        entries.slice(1, expectedForkContext.length + 1),
+        expectedForkContext,
+        "Fork session should start with copied parent context",
+      );
     });
 
     // ── caller_ping ──

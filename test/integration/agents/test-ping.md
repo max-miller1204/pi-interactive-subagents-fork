@@ -1,6 +1,7 @@
 ---
 name: test-ping
 description: Integration test agent — calls caller_ping instead of completing task
+model: openai-codex/gpt-5.6-luna
 tools: read, bash
 spawning: false
 disable-model-invocation: true

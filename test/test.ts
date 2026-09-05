@@ -236,6 +236,16 @@ const TOOL_RESULT = {
 
 // --- Tests ---
 
+describe("test environment", () => {
+  it("does not inherit subagent control variables", () => {
+    const inheritedControls = Object.keys(process.env).filter((name) =>
+      name.startsWith("PI_SUBAGENT_"),
+    );
+
+    assert.deepEqual(inheritedControls, []);
+  });
+});
+
 describe("session.ts", () => {
   let dir: string;
 
