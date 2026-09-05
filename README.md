@@ -61,7 +61,7 @@ subagent_message({ name: "scout", message: "Also check the auth middleware" });
 
 Every Pi-backed spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name is not registered, the session file is gone, the session predates extension-manifest snapshots, or a pinned extension or skill file is no longer installed.
 
-**Resume replays the original sandbox.** At spawn time the fully resolved loadout — tool allowlist, exact tool/provider/control extension entry paths, skill policy and pinned skill files, model identity, thinking level, system prompt, spawn whitelist, cwd, and Pi config-directory path — is snapshotted to `<session>.loadout.json`. Resume uses only those pinned paths; it never re-resolves strict skill or tool access from the current parent or falls back to unrestricted global discovery. Mutable request configuration read from the snapshotted agent directory, including `models.json`, authentication state, and provider/model headers, remains external to the sidecar and is not frozen across resume.
+**Resume replays the original sandbox.** At spawn time the fully resolved loadout — tool allowlist, exact tool/provider/control extension entry paths, skill policy and pinned skill files, model identity, thinking level, system prompt, spawn whitelist, cwd, and Pi config-directory path — is snapshotted to `<session>.loadout.json`. Resume replays those pinned entry paths without resolving strict skill or tool paths from the current parent. Extension discovery stays disabled. Normal skill discovery stays disabled for `none` and `allowlist`. Trusted pinned extensions can still contribute resources at runtime, as described in [Skill access control](#skill-access-control). Mutable request configuration read from the snapshotted agent directory, including `models.json`, authentication state, and provider/model headers, remains external to the sidecar and is not frozen across resume.
 
 ### ask_question
 
@@ -111,8 +111,8 @@ You are a specialized agent that does X...
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Any extension tool loaded in the parent can be used when Pi reports a loadable `sourceInfo.path`; `safe_bash` is bundled. Only the extensions backing listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to load eagerly. With `allowlist`, each name must also be in `available-skills` |
-| `skill-policy` | string | `all` (default), `allowlist`, or `none`. Strict policies are supported only for Pi sub-agents |
-| `available-skills` | string | Comma-separated skills the child can discover or invoke when `skill-policy: allowlist` is set |
+| `skill-policy` | string | `all` (default), `allowlist`, or `none`. Controls normal Pi skill discovery and explicit skill files, not resources from trusted extensions. Strict policies are supported only for Pi sub-agents |
+| `available-skills` | string | Comma-separated skills to pin and load explicitly when `skill-policy: allowlist` is set |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
 | `system-prompt` | string | `append` or `replace`: pass the body as the child's `--append-system-prompt` / `--system-prompt`. Omit and the body is prepended to the task prompt instead |
 | `auto-exit` | boolean | Auto-shutdown when the agent finishes (see below) |
@@ -156,18 +156,22 @@ Pi does not currently expose model-provider source paths. Extensions that call `
 
 The default `skill-policy: all` keeps Pi's normal skill discovery. The `skills` field only loads named skills eagerly; it does not restrict which other skills the child can discover.
 
-Use one of these strict policies when a role must not see every installed skill:
+Use one of these strict policies to disable normal skill discovery:
 
 - `allowlist` starts Pi with `--no-skills`, then loads each `available-skills` entry again with an exact `--skill <path>` argument.
-- `none` starts Pi with `--no-skills` and does not load any skill.
+- `none` starts Pi with `--no-skills` and does not pass any explicit skill file.
 
 For `allowlist`, the launcher resolves each name from the parent's `pi.getCommands()` metadata and pins the reported skill file. Launch fails before pane creation if a name is missing or duplicated, a path is not an absolute existing file, two names resolve to one file, or an eager `skills` entry is not in `available-skills`. Resume replays these exact files and fails closed if one disappears. A legacy snapshot without skill fields keeps the former `all` behavior.
 
-Strict skill policies apply only to Pi sub-agents. Claude CLI profiles that declare `skill-policy` or `available-skills` are rejected. Skill policy limits Pi's skill catalog and invocation commands; it is not a file-system sandbox for agents that have file-reading tools.
+These policies control normal Pi skill discovery and the skill files that the launcher loads explicitly. Trusted pinned tool and model-provider extensions can add other skills through `resources_discover`, including with `none` or `allowlist`. These skills can appear in the child's catalog and invocation commands on launch and resume. Extension resource contributions are not pinned by the skill manifest.
+
+Extensions are executable trusted code. They can also alter prompts or register commands. Skill policy is not a sandbox against these extensions, or a file-system sandbox for agents that have file-reading tools. Only load extensions that you trust with the child's context and permissions.
+
+Strict skill policies apply only to Pi sub-agents. Claude CLI profiles that declare `skill-policy` or `available-skills` are rejected.
 
 ## Role folders
 
-`cwd` starts a sub-agent in a directory with its own config, so role-specific context applies. With the default `all` policy, role-specific skills are also discovered. With `allowlist`, a role-specific skill must already be present in the parent's command metadata so the launcher can pin its exact file. Restricted agents still use `--no-extensions`; a role-specific extension tool must already be represented by parent provenance or the explicit compatibility registration hook:
+`cwd` starts a sub-agent in a directory with its own config, so role-specific context applies. With the default `all` policy, role-specific skills are also discovered. With `allowlist`, a role-specific skill loaded explicitly by the launcher must already be present in the parent's command metadata so the launcher can pin its exact file. Trusted extensions can contribute other skills at runtime. Restricted agents still use `--no-extensions`; a role-specific extension tool must already be represented by parent provenance or the explicit compatibility registration hook:
 
 ```
 project/

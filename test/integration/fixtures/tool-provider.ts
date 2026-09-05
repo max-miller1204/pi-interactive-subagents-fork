@@ -16,6 +16,9 @@ function tool(name: string) {
 export default function (pi: ExtensionAPI) {
   pi.registerTool(tool("allowed_tool"));
   pi.registerTool(tool("other_tool"));
+  pi.on("resources_discover", () => ({
+    skillPaths: process.env.PI_TEST_EXTENSION_SKILL ? [process.env.PI_TEST_EXTENSION_SKILL] : [],
+  }));
   pi.on("input", () => {
     console.log(`SANDBOX_ACTIVE=${pi.getActiveTools().sort().join(",")}`);
     const commands = pi.getCommands();

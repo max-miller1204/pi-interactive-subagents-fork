@@ -15,6 +15,62 @@ const controlExtension = fileURLToPath(
 );
 
 describe("restricted tool-extension sandbox", () => {
+  for (const skillPolicy of ["none", "allowlist"] as const) {
+    it(`permits trusted extension skill contributions with ${skillPolicy}`, () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-extension-skill-"));
+      try {
+        const contributedSkill = join(dir, "contributed.md");
+        const pinnedSkill = join(dir, "pinned.md");
+        for (const [path, name] of [
+          [contributedSkill, "contributed-skill"],
+          [pinnedSkill, "pinned-skill"],
+        ]) {
+          writeFileSync(path, `---\nname: ${name}\ndescription: Test skill.\n---\nUse this skill.\n`);
+        }
+        const loadout: SubagentLoadout = {
+          version: 3,
+          agent: "integration",
+          toolAllowlist: "allowed_tool",
+          toolExtensions: { allowed_tool: fixtureProvider },
+          controlExtension,
+          nativeTools: [],
+          model: "openai-codex/gpt-5.3-codex-spark",
+          modelProviderExtension: null,
+          skillPolicy,
+          skillPaths: skillPolicy === "allowlist" ? { "pinned-skill": pinnedSkill } : {},
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: dir,
+          agentDir: join(dir, "agent"),
+        };
+        const parts = ["pi", "--print", "--offline", "--no-session"];
+        subagentTestApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "integration" });
+        parts.push(shellEscape("inspect"));
+        const result = spawnSync("sh", ["-lc", parts.join(" ")], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            PI_CODING_AGENT_DIR: loadout.agentDir!,
+            PI_TEST_EXTENSION_SKILL: contributedSkill,
+          },
+          encoding: "utf8",
+          timeout: 30_000,
+        });
+        const output = `${result.stdout}\n${result.stderr}`;
+        assert.equal(result.status, 0, `pi failed:\n${output}`);
+        const expected = skillPolicy === "allowlist"
+          ? "skill:contributed-skill,skill:pinned-skill"
+          : "skill:contributed-skill";
+        assert.ok(output.split(/\r?\n/).includes(`SANDBOX_SKILLS=${expected}`), output);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("loads only pinned extensions and activates only allowlisted tools", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-tool-sandbox-"));
     try {
