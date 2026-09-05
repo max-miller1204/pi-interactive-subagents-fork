@@ -131,6 +131,37 @@ for (const backend of backends) {
       assert.equal(remainingPanes.has(child), false);
     });
 
+    it("cleans child panes created while the parent closes", () => {
+      const anchor = execFileSync(
+        "tmux",
+        ["new-window", "-d", "-P", "-F", "#{pane_id}"],
+        { encoding: "utf8" },
+      ).trim();
+      try {
+        const parent = execFileSync(
+          "tmux",
+          ["split-window", "-d", "-t", anchor, "-P", "-F", "#{pane_id}"],
+          { encoding: "utf8" },
+        ).trim();
+        env.surfaces.push(parent);
+        // Complete a pending child split when cleanup closes the parent.
+        execFileSync("tmux", [
+          "set-hook", "-t", anchor, "after-kill-pane",
+          `set-hook -u -t ${anchor} after-kill-pane ; split-window -d -t ${anchor} -c ${shellEscape(env.dir)}`,
+        ]);
+
+        cleanupTestEnv(env);
+
+        const remainingPanes = execFileSync(
+          "tmux", ["list-panes", "-t", anchor, "-F", "#{pane_id}"],
+          { encoding: "utf8" },
+        ).trim().split("\n");
+        assert.deepEqual(remainingPanes, [anchor]);
+      } finally {
+        execFileSync("tmux", ["kill-window", "-t", anchor]);
+      }
+    });
+
     it("preserves shell special characters in echo output", async () => {
       const surface = createTrackedSurface(env, "escape-test");
       await sleep(1000);

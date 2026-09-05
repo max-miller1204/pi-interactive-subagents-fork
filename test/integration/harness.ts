@@ -189,6 +189,12 @@ export function createTestEnv(): TestEnv {
  */
 export function cleanupTestEnv(env: TestEnv): void {
   const tracked = new Set(env.surfaces);
+  // Stop parents before the pane scan so pending child splits are included.
+  for (const surface of tracked) {
+    try {
+      closeSurface(surface);
+    } catch {}
+  }
   for (const pane of listPanes()) {
     const belongsToTest =
       tracked.has(pane.id) ||
