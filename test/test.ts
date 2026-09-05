@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -121,6 +121,9 @@ function createMockExtensionApi() {
         sentMessages.push({ message, options });
       },
       getAllTools() {
+        return [];
+      },
+      getCommands() {
         return [];
       },
       getActiveTools() {
@@ -353,6 +356,8 @@ describe("session.ts", () => {
       nativeTools: ["read", "write", "edit"],
       model: "openrouter/z-ai/glm-5.2",
       modelProviderExtension: null,
+      skillPolicy: "all",
+      skillPaths: {},
       thinking: "medium",
       systemPromptMode: "append",
       identity: "You are a worker agent.",
@@ -412,6 +417,12 @@ describe("session.ts", () => {
         { nativeTools: [""] },
         { toolAllowlist: null },
         { toolAllowlist: "" },
+        { skillPolicy: "invalid" },
+        { skillPaths: [] },
+        { skillPolicy: "all", skillPaths: { review: "/skills/review/SKILL.md" } },
+        { skillPolicy: "allowlist", skillPaths: {} },
+        { skillPolicy: "allowlist", skillPaths: { review: "relative/SKILL.md" } },
+        { skillPolicy: "allowlist", skillPaths: { "Bad Name": "/skills/review/SKILL.md" } },
       ]) {
         const sessionFile = join(dir, `invalid-${Math.random()}.jsonl`);
         writeFileSync(sessionFile + ".loadout.json", JSON.stringify({ ...sample, ...patch }), "utf8");
@@ -1159,6 +1170,26 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("loads strict skill policy fields from frontmatter", async () => {
+    await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
+      writeAgentFile(
+        projectAgentsDir,
+        "strict-skills-test-agent",
+        [
+          "name: strict-skills-test-agent",
+          "skill-policy: allowlist",
+          "available-skills: iterative-review, reviewed-pr",
+          "skills: iterative-review",
+        ].join("\n"),
+      );
+
+      const loaded = testApi.loadAgentDefaults("strict-skills-test-agent");
+      assert.equal(loaded?.skillPolicy, "allowlist");
+      assert.deepEqual(loaded?.availableSkills, ["iterative-review", "reviewed-pr"]);
+      assert.equal(loaded?.skills, "iterative-review");
+    });
+  });
+
   it("loads explicit interactive flag from frontmatter", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
@@ -1302,6 +1333,76 @@ describe("subagent discovery", () => {
       assert.deepEqual({ ...manifest.toolExtensions }, { bash: provider });
       assert.deepEqual(manifest.nativeTools, ["read", "future_builtin"]);
       assert.deepEqual(manifest.unresolved, []);
+    });
+  });
+
+  it("resolves strict skill allowlists from canonical parent command metadata", () => {
+    withTempDir((dir) => {
+      const iterativeReview = join(dir, "iterative-review-SKILL.md");
+      const reviewedPr = join(dir, "reviewed-pr-SKILL.md");
+      writeFileSync(iterativeReview, "# Iterative review", "utf8");
+      writeFileSync(reviewedPr, "# Reviewed PR", "utf8");
+      const commands = [
+        { name: "iterative-review", source: "skill", sourceInfo: { path: iterativeReview } },
+        { name: "skill:reviewed-pr", source: "skill", sourceInfo: { path: reviewedPr } },
+        { name: "ordinary-command", source: "extension", sourceInfo: { path: reviewedPr } },
+      ];
+
+      const resolved = testApi.resolveSkillSandbox(
+        "allowlist",
+        "iterative-review",
+        ["iterative-review", "reviewed-pr"],
+        commands,
+      );
+      assert.equal(resolved.policy, "allowlist");
+      assert.equal(Object.getPrototypeOf(resolved.skillPaths), null);
+      assert.deepEqual({ ...resolved.skillPaths }, {
+        "iterative-review": iterativeReview,
+        "reviewed-pr": reviewedPr,
+      });
+      assert.deepEqual(testApi.resolveSkillSandbox(undefined, "any-skill", undefined, []), {
+        policy: "all",
+        skillPaths: {},
+      });
+      assert.deepEqual(testApi.resolveSkillSandbox("none", undefined, undefined, []), {
+        policy: "none",
+        skillPaths: {},
+      });
+    });
+  });
+
+  it("fails closed for invalid or unresolved strict skill policies", () => {
+    withTempDir((dir) => {
+      const skill = join(dir, "SKILL.md");
+      writeFileSync(skill, "# Review", "utf8");
+      const one = [{ name: "review", source: "skill", sourceInfo: { path: skill } }];
+
+      assert.throws(() => testApi.resolveSkillSandbox("invalid", undefined, undefined, []), /Invalid skill-policy/);
+      assert.throws(() => testApi.resolveSkillSandbox("all", undefined, ["review"], one), /requires skill-policy/);
+      assert.throws(() => testApi.resolveSkillSandbox("none", "review", undefined, one), /cannot be combined/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", undefined, undefined, one), /non-empty/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", "other", ["review"], one), /included/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", undefined, ["review", "review"], one), /duplicate names/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", "review, review", ["review"], one), /skills contains duplicate/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", undefined, ["Missing"], one), /Invalid skill name/);
+      assert.throws(() => testApi.resolveSkillSandbox("allowlist", undefined, ["missing"], one), /Cannot resolve/);
+      assert.throws(
+        () => testApi.resolveSkillSandbox("allowlist", undefined, ["review"], [...one, ...one]),
+        /ambiguous command provenance/,
+      );
+      assert.throws(
+        () => testApi.resolveSkillSandbox("allowlist", undefined, ["review"], [
+          { name: "review", source: "skill", sourceInfo: { path: join(dir, "missing.md") } },
+        ]),
+        /absolute loadable file/,
+      );
+      assert.throws(
+        () => testApi.resolveSkillSandbox("allowlist", undefined, ["review", "review-alias"], [
+          ...one,
+          { name: "review-alias", source: "skill", sourceInfo: { path: skill } },
+        ]),
+        /duplicate source files/,
+      );
     });
   });
 
@@ -1799,6 +1900,51 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("applySandboxToParts disables discovery and replays pinned skill files", () => {
+    withTempDir((d) => {
+      const reviewSkill = join(d, "review-SKILL.md");
+      const prSkill = join(d, "pr-SKILL.md");
+      writeFileSync(reviewSkill, "# Review", "utf8");
+      writeFileSync(prSkill, "# PR", "utf8");
+      const base: SubagentLoadout = {
+        version: 3,
+        agent: "reviewer",
+        toolAllowlist: "read,ask_question",
+        toolExtensions: {},
+        controlExtension: CONTROL_EXTENSION,
+        nativeTools: ["read"],
+        model: "openrouter/test-model",
+        modelProviderExtension: null,
+        skillPolicy: "allowlist",
+        skillPaths: { review: reviewSkill, "reviewed-pr": prSkill },
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: true,
+        cwd: d,
+        agentDir: join(d, "agent"),
+      };
+      const parts: string[] = [];
+      testApi.applySandboxToParts(parts, base, { artifactDir: d, name: "reviewer" });
+
+      assert.ok(parts.includes("--no-skills"));
+      assert.deepEqual(
+        parts.filter((part, index) => parts[index - 1] === "--skill"),
+        [`'${reviewSkill}'`, `'${prSkill}'`],
+      );
+
+      const noSkills: string[] = [];
+      testApi.applySandboxToParts(
+        noSkills,
+        { ...base, skillPolicy: "none", skillPaths: {} },
+        { artifactDir: d, name: "review-pass" },
+      );
+      assert.ok(noSkills.includes("--no-skills"));
+      assert.ok(!noSkills.includes("--skill"));
+    });
+  });
+
   it("applySandboxToParts uses only pinned paths and deduplicates shared providers", () => {
     withTempDir((d) => {
       const pinnedProvider = join(d, "pinned-provider.ts");
@@ -1944,6 +2090,28 @@ describe("subagent discovery", () => {
           nativeTools: [],
         }),
         /no backing extension for "toString"/,
+      );
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot({
+          ...missingSnapshot,
+          toolAllowlist: "read,ask_question",
+          toolExtensions: {},
+          nativeTools: ["read"],
+          skillPolicy: "allowlist",
+          skillPaths: { review: join(d, "removed-SKILL.md") },
+        }),
+        /skill "review" no longer exists/,
+      );
+      assert.match(
+        testApi.validateSandboxExtensionSnapshot({
+          ...missingSnapshot,
+          toolAllowlist: "read,ask_question",
+          toolExtensions: {},
+          nativeTools: ["read"],
+          skillPolicy: "none",
+          skillPaths: { review: CONTROL_EXTENSION },
+        }),
+        /includes skill paths for the none policy/,
       );
     });
   });

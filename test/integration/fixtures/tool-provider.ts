@@ -1,5 +1,5 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 function tool(name: string) {
   return {
@@ -16,8 +16,20 @@ function tool(name: string) {
 export default function (pi: ExtensionAPI) {
   pi.registerTool(tool("allowed_tool"));
   pi.registerTool(tool("other_tool"));
+  pi.on("resources_discover", () => ({
+    skillPaths: process.env.PI_TEST_EXTENSION_SKILL ? [process.env.PI_TEST_EXTENSION_SKILL] : [],
+  }));
   pi.on("input", () => {
     console.log(`SANDBOX_ACTIVE=${pi.getActiveTools().sort().join(",")}`);
+    const commands = pi.getCommands();
+    const skills = commands
+      .filter((command) => command.source === "skill")
+      .map((command) => command.name)
+      .sort();
+    console.log(`SANDBOX_SKILLS=${skills.join(",")}`);
+    if (process.env.PI_TEST_REPORT_SKILL_COMMANDS) {
+      console.log(`SANDBOX_SKILL_COMMANDS=${JSON.stringify(commands.filter((command) => command.source === "skill"))}`);
+    }
     return { action: "handled" as const };
   });
 }

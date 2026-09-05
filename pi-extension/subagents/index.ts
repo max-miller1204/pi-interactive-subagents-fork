@@ -1,7 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { keyHint } from "@mariozechner/pi-coding-agent";
-import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
+import { Type, type Static } from "typebox";
+import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -110,17 +110,20 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(
     Type.String({
       description:
-        "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config, CLAUDE.md, skills, and extensions. Use for role-specific subfolders.",
+        "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config and CLAUDE.md. Skill and extension policies still apply. Use for role-specific subfolders.",
     }),
   ),
 });
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
+type SkillPolicy = "all" | "allowlist" | "none";
 
 interface AgentDefaults {
   model?: string;
   tools?: string;
   skills?: string;
+  skillPolicy?: string;
+  availableSkills?: string[];
   thinking?: string;
   /**
    * If set (non-empty), this agent is granted the full subagent spawning
@@ -187,6 +190,20 @@ interface ToolSourceMetadata {
   };
 }
 
+interface SkillCommandMetadata {
+  name: string;
+  source?: string;
+  sourceInfo?: {
+    path?: string;
+    source?: string;
+  };
+}
+
+interface SkillSandboxResolution {
+  policy: SkillPolicy;
+  skillPaths: Record<string, string>;
+}
+
 export interface ToolExtensionResolution {
   toolExtensions: Record<string, string>;
   nativeTools: string[];
@@ -243,6 +260,18 @@ function isLoadableExtensionPath(extensionPath: unknown): extensionPath is strin
   }
   try {
     return statSync(extensionPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isLoadableSkillPath(skillPath: unknown): skillPath is string {
+  if (typeof skillPath !== "string" || !isAbsolute(skillPath) || !existsSync(skillPath)) {
+    return false;
+  }
+  try {
+    // Pin one skill file. A directory could load extra skills later.
+    return statSync(skillPath).isFile();
   } catch {
     return false;
   }
@@ -442,6 +471,95 @@ function resolveToolExtensionManifest(
   return { toolExtensions, nativeTools, unresolved };
 }
 
+function getParentCommands(): readonly SkillCommandMetadata[] {
+  return latestPi?.getCommands() ?? [];
+}
+
+function skillNameForCommand(command: SkillCommandMetadata): string | null {
+  if (command.source !== "skill") return null;
+  return command.name.startsWith("skill:") ? command.name.slice("skill:".length) : command.name;
+}
+
+function resolveSkillSandbox(
+  skillPolicy: string | undefined,
+  eagerSkills: string | undefined,
+  availableSkills: readonly string[] | undefined,
+  commands: readonly SkillCommandMetadata[] = getParentCommands(),
+): SkillSandboxResolution {
+  const policy = skillPolicy ?? "all";
+  if (policy !== "all" && policy !== "allowlist" && policy !== "none") {
+    throw new Error(`Invalid skill-policy "${policy}". Use "all", "allowlist", or "none".`);
+  }
+
+  const eager = parseCommaList(eagerSkills) ?? [];
+  const allowed = availableSkills ?? [];
+
+  if (policy === "all") {
+    if (allowed.length > 0) {
+      throw new Error("available-skills requires skill-policy: allowlist");
+    }
+    return { policy, skillPaths: {} };
+  }
+
+  if (policy === "none") {
+    if (eager.length > 0 || allowed.length > 0) {
+      throw new Error("skill-policy: none cannot be combined with skills or available-skills");
+    }
+    return { policy, skillPaths: {} };
+  }
+
+  if (allowed.length === 0) {
+    throw new Error("skill-policy: allowlist requires a non-empty available-skills list");
+  }
+
+  const invalidNames = [...allowed, ...eager].filter((name) => !/^[a-z0-9-]{1,64}$/.test(name));
+  if (invalidNames.length > 0) {
+    throw new Error(`Invalid skill name(s): ${[...new Set(invalidNames)].join(", ")}`);
+  }
+  if (new Set(allowed).size !== allowed.length) {
+    throw new Error("available-skills contains duplicate names");
+  }
+  if (new Set(eager).size !== eager.length) {
+    throw new Error("skills contains duplicate names");
+  }
+
+  const allowedSet = new Set(allowed);
+  const unavailableEager = eager.filter((name) => !allowedSet.has(name));
+  if (unavailableEager.length > 0) {
+    throw new Error(
+      `Eager skills must be included in available-skills: ${[...new Set(unavailableEager)].join(", ")}`,
+    );
+  }
+
+  const skillPaths: Record<string, string> = Object.create(null);
+  const missing: string[] = [];
+  for (const name of allowed) {
+    const matches = commands.filter((command) => skillNameForCommand(command) === name);
+    if (matches.length === 0) {
+      missing.push(name);
+      continue;
+    }
+    if (matches.length > 1) {
+      throw new Error(`Skill "${name}" has ambiguous command provenance`);
+    }
+    const skillPath = matches[0].sourceInfo?.path;
+    if (!isLoadableSkillPath(skillPath)) {
+      throw new Error(
+        `Skill "${name}" does not have an absolute loadable file in parent command metadata`,
+      );
+    }
+    skillPaths[name] = skillPath;
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`Cannot resolve allowed skill(s) from parent command metadata: ${missing.join(", ")}`);
+  }
+  if (new Set(Object.values(skillPaths)).size !== Object.keys(skillPaths).length) {
+    throw new Error("Allowed skills resolve to duplicate source files");
+  }
+  return { policy, skillPaths };
+}
+
 /**
  * When this process was spawned as a restricted subagent, the parent pins the
  * set of agents it may itself spawn via PI_SUBAGENT_ALLOWED. `null` means no
@@ -501,6 +619,8 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
           ? "append"
           : undefined,
     skills: getFrontmatterValue(frontmatter, "skill") ?? getFrontmatterValue(frontmatter, "skills"),
+    skillPolicy: getFrontmatterValue(frontmatter, "skill-policy"),
+    availableSkills: parseCommaList(getFrontmatterValue(frontmatter, "available-skills")),
     thinking: getFrontmatterValue(frontmatter, "thinking"),
     subagentAgents: parseCommaList(getFrontmatterValue(frontmatter, "subagent_agents")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
@@ -1062,9 +1182,8 @@ function buildSubagentToolAllowlist(
 }
 
 /**
- * Apply a loadout snapshot's sandbox to a pi command's `parts` array: model,
- * identity (system prompt), and the default-deny tool/extension restriction
- * (`--no-extensions` + `--tools` + one `-e` per tool-backing extension).
+ * Apply a loadout snapshot's sandbox to a Pi command's `parts` array: model,
+ * identity, skill policy, and the default-deny tool and extension restriction.
  *
  * This is the single source of truth for reconstructing a subagent's sandbox,
  * used both by the initial `launchSubagent` and by the `subagent_message`
@@ -1084,6 +1203,33 @@ function validateSandboxExtensionSnapshot(loadout: SubagentLoadout): string | nu
     !Array.isArray(loadout.nativeTools)
   ) {
     return "sandbox snapshot predates extension-manifest pinning";
+  }
+
+  const skillPolicy = loadout.skillPolicy ?? "all";
+  if (skillPolicy !== "all" && skillPolicy !== "allowlist" && skillPolicy !== "none") {
+    return "sandbox snapshot has an invalid skill policy";
+  }
+  const skillPaths = loadout.skillPaths ?? {};
+  if (!skillPaths || typeof skillPaths !== "object" || Array.isArray(skillPaths)) {
+    return "sandbox snapshot has a malformed skill path manifest";
+  }
+  const pinnedSkills = Object.entries(skillPaths);
+  if (skillPolicy === "allowlist" && pinnedSkills.length === 0) {
+    return "sandbox snapshot has an empty skill allowlist";
+  }
+  if (skillPolicy !== "allowlist" && pinnedSkills.length > 0) {
+    return `sandbox snapshot includes skill paths for the ${skillPolicy} policy`;
+  }
+  if (new Set(pinnedSkills.map(([, skillPath]) => skillPath)).size !== pinnedSkills.length) {
+    return "sandbox snapshot includes duplicate skill paths";
+  }
+  for (const [skill, skillPath] of pinnedSkills) {
+    if (!/^[a-z0-9-]{1,64}$/.test(skill)) {
+      return `sandbox snapshot has an invalid skill name "${skill}"`;
+    }
+    if (!isLoadableSkillPath(skillPath)) {
+      return `snapshotted skill "${skill}" no longer exists as a file: ${skillPath}`;
+    }
   }
 
   if (typeof loadout.controlExtension !== "string" || !isAbsolute(loadout.controlExtension)) {
@@ -1157,10 +1303,18 @@ function applySandboxToParts(
     parts.push(flag, shellEscape(spPath));
   }
 
-  // Default-deny: disable discovery and replay only the extension paths pinned
-  // at initial spawn. Never re-resolve against the current parent on resume.
+  // Default-deny: disable discovery and replay only the paths pinned at initial
+  // spawn. Never re-resolve strict skill or extension paths on resume.
   const snapshotError = validateSandboxExtensionSnapshot(loadout);
   if (snapshotError) throw new Error(`Cannot safely apply subagent sandbox: ${snapshotError}.`);
+
+  const skillPolicy = loadout.skillPolicy ?? "all";
+  if (skillPolicy !== "all") parts.push("--no-skills");
+  if (skillPolicy === "allowlist") {
+    for (const skillPath of Object.values(loadout.skillPaths ?? {})) {
+      parts.push("--skill", shellEscape(skillPath));
+    }
+  }
 
   parts.push("--no-extensions");
   parts.push("--tools", shellEscape(loadout.toolAllowlist));
@@ -1431,6 +1585,7 @@ export const __test__ = {
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
   resolveToolExtensionManifest,
+  resolveSkillSandbox,
   validateSandboxExtensionSnapshot,
   applySandboxToParts,
   buildPiPromptArgs,
@@ -1493,6 +1648,19 @@ async function launchSubagent(
     runtimeModel ? resolveModelProviderExtension(runtimeModel) : null;
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
+  if (
+    cli === "claude" &&
+    (agentDefs?.skillPolicy !== undefined || (agentDefs?.availableSkills?.length ?? 0) > 0)
+  ) {
+    throw new Error("skill-policy and available-skills are supported only for Pi subagents");
+  }
+  const skillSandbox = cli === "pi"
+    ? resolveSkillSandbox(
+        agentDefs?.skillPolicy,
+        effectiveSkills,
+        agentDefs?.availableSkills,
+      )
+    : { policy: "all" as const, skillPaths: {} };
   const effectiveThinking = agentDefs?.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
@@ -1672,6 +1840,8 @@ async function launchSubagent(
     nativeTools,
     model: `${runtimeModel.provider}/${runtimeModel.id}`,
     modelProviderExtension,
+    skillPolicy: skillSandbox.policy,
+    skillPaths: skillSandbox.skillPaths,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
     identity: identityInSystemPrompt ? identity : null,
@@ -1682,8 +1852,8 @@ async function launchSubagent(
   };
   writeSubagentLoadout(subagentSessionFile, loadout);
 
-  // Apply model, identity, and the default-deny tool/extension restriction via
-  // the shared helper (same code path resume uses — they can't drift).
+  // Apply model, identity, and the default-deny skill/tool/extension restriction
+  // through the shared helper (same code path resume uses — they cannot drift).
   applySandboxToParts(parts, loadout, { artifactDir, name: params.name });
 
   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
