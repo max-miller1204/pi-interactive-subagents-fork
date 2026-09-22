@@ -4,8 +4,9 @@
  * - Provides an `ask_question` tool for asking the parent orchestrator a question
  *
  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
- * at final settlement (see the `agent_before_settle` handler);
- * interactive agents end when the human exits the pane.
+ * at the final `agent_before_settle` boundary, after Pi finishes retries and
+ * queued continuations. A low-level `agent_end` does not close the session.
+ * Interactive agents end when the human exits the pane.
  *
  * `ask_question` keeps the session OPEN: it writes a `${sessionFile}.ask`
  * signal the parent's watcher picks up, parks the session in a "waiting" state
@@ -31,8 +32,8 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
  * symbol. A subagent that spawns children and then writes a "waiting for
  * results" message would otherwise auto-exit the instant that turn ends —
  * killing the session before its children report back. Reading this count lets
- * `agent_before_settle` keep the session open until every child has finished and its
- * result has been delivered.
+ * `agent_before_settle` keep the session open until every child has finished and
+ * its result has been delivered.
  *
  * Returns 0 when the spawning tools aren't loaded (scout/researcher, or a
  * standalone session), so those agents auto-exit exactly as before.
@@ -227,8 +228,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_before_settle", (event, ctx) => {
     const messages = event.context.contextMessages as any[];
     // Keep this session open while it waits for an answer or child result.
-    // A low-level agent_end can occur before a retry. Only this final boundary
-    // can shut down the session or write an error sidecar.
+    // Pi can retry or process a queued continuation after a low-level agent_end.
+    // Only this final boundary can shut down the session or write an error sidecar.
     const hasPendingChildren = runningChildrenCount() > 0;
     const shouldExit =
       event.outcome !== "aborted" &&
