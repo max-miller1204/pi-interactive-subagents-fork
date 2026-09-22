@@ -2824,6 +2824,64 @@ describe("subagent activity snapshots", () => {
     });
   });
 
+  it("records agent_before_settle done after agent_end waiting", () => {
+    withTempDir((dir) => {
+      let currentNow = 2_000;
+      const childId = "settled-child";
+      const file = getSubagentActivityFile(dir, childId);
+      const recorder = createSubagentActivityRecorder({ runningChildId: childId, activityFile: file, now: () => currentNow });
+
+      recorder.sessionStart();
+      recorder.agentStart();
+      currentNow = 3_000;
+      recorder.agentEndWaiting();
+      let snapshot = readSubagentActivityFile(file, childId);
+      assert.equal(snapshot.ok && snapshot.activity.latestEvent, "agent_end");
+      assert.equal(snapshot.ok && snapshot.activity.phase, "waiting");
+
+      currentNow = 4_000;
+      recorder.agentBeforeSettleDone();
+      snapshot = readSubagentActivityFile(file, childId);
+      assert.equal(snapshot.ok && snapshot.activity.latestEvent, "agent_before_settle");
+      assert.equal(snapshot.ok && snapshot.activity.phase, "done");
+      assert.equal(snapshot.ok && snapshot.activity.waitingSince, undefined);
+      assert.equal(snapshot.ok && snapshot.activity.agentActive, false);
+      assert.equal(snapshot.ok && snapshot.activity.sequence, 4);
+
+      recorder.agentStart();
+      snapshot = readSubagentActivityFile(file, childId);
+      assert.equal(snapshot.ok && snapshot.activity.phase, "done");
+      assert.equal(snapshot.ok && snapshot.activity.sequence, 4);
+    });
+  });
+
+  it("records agent_before_settle waiting and keeps recording", () => {
+    withTempDir((dir) => {
+      let currentNow = 2_000;
+      const childId = "waiting-child";
+      const file = getSubagentActivityFile(dir, childId);
+      const recorder = createSubagentActivityRecorder({ runningChildId: childId, activityFile: file, now: () => currentNow });
+
+      recorder.sessionStart();
+      recorder.agentStart();
+      currentNow = 3_000;
+      recorder.agentBeforeSettleWaiting();
+      let snapshot = readSubagentActivityFile(file, childId);
+      assert.equal(snapshot.ok && snapshot.activity.latestEvent, "agent_before_settle");
+      assert.equal(snapshot.ok && snapshot.activity.phase, "waiting");
+      assert.equal(snapshot.ok && snapshot.activity.waitingSince, 3_000);
+      assert.equal(snapshot.ok && snapshot.activity.agentActive, false);
+      assert.equal(snapshot.ok && snapshot.activity.activeScope, undefined);
+
+      currentNow = 4_000;
+      recorder.agentStart();
+      snapshot = readSubagentActivityFile(file, childId);
+      assert.equal(snapshot.ok && snapshot.activity.latestEvent, "agent_start");
+      assert.equal(snapshot.ok && snapshot.activity.phase, "active");
+      assert.equal(snapshot.ok && snapshot.activity.waitingSince, undefined);
+    });
+  });
+
   it("rejects malformed activity fields used by classification and rendering", () => {
     withTempDir((dir) => {
       mkdirSync(join(dir, "subagent-activity"), { recursive: true });
