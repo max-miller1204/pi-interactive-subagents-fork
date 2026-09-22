@@ -4,8 +4,8 @@
  * - Provides an `ask_question` tool for asking the parent orchestrator a question
  *
  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
- * at the final `agent_before_settle` boundary, after Pi finishes retries and
- * queued continuations. A low-level `agent_end` does not close the session.
+ * when `agent_settled` confirms eligibility from `agent_before_settle`, after
+ * Pi finishes retries and queued continuations. A low-level `agent_end` does not close the session.
  * Interactive agents end when the human exits the pane.
  *
  * `ask_question` keeps the session OPEN: it writes a `${sessionFile}.ask`
@@ -178,9 +178,11 @@ export default function (pi: ExtensionAPI) {
   let agentStarted = false;
   // Set when ask_question is called; suppresses auto-exit so the session stays
   // open while it waits for the orchestrator's reply. Cleared when the reply
-  // lands — on `input` (covers a reply steered into the current run) and on
-  // `agent_start` (covers a reply that starts a fresh turn after parking).
+  // lands on `input`. An automatic retry also fires `agent_start`, but does
+  // not answer the question.
   let awaitingAnswer = false;
+  let eligibleToExit = false;
+  let finalMessages: any[] | undefined;
 
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
@@ -215,9 +217,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     agentStarted = true;
-    // A new turn is starting — any pending ask_question has now been answered
-    // (or superseded), so let auto-exit resume normally when this turn ends.
-    awaitingAnswer = false;
+    // A provider retry is not a reply. Only input clears awaitingAnswer.
+    eligibleToExit = false;
     recorder.agentStart();
   });
 
@@ -225,11 +226,12 @@ export default function (pi: ExtensionAPI) {
     recorder.agentEndWaiting();
   });
 
-  pi.on("agent_before_settle", (event, ctx) => {
+  pi.on("agent_before_settle", (event) => {
     const messages = event.context.contextMessages as any[];
+    finalMessages = messages;
     // Keep this session open while it waits for an answer or child result.
     // Pi can retry or process a queued continuation after a low-level agent_end.
-    // Only this final boundary can shut down the session or write an error sidecar.
+    // This boundary decides eligibility. Only settlement commits terminal effects.
     const hasPendingChildren = runningChildrenCount() > 0;
     const shouldExit =
       event.outcome !== "aborted" &&
@@ -238,13 +240,16 @@ export default function (pi: ExtensionAPI) {
       autoExit &&
       shouldAutoExitBeforeSettle(messages);
 
-    if (!shouldExit) {
-      recorder.agentBeforeSettleWaiting();
-      if (autoExit) userTookOver = false;
-      return;
-    }
+    eligibleToExit = shouldExit;
+    recorder.agentBeforeSettleWaiting();
+    if (autoExit) userTookOver = false;
+  });
 
-    const errorInfo = findLatestAssistantError(messages);
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!eligibleToExit || awaitingAnswer || runningChildrenCount() > 0 || ctx.hasPendingMessages() ||
+        !shouldAutoExitBeforeSettle(finalMessages)) return;
+    eligibleToExit = false;
+    const errorInfo = findLatestAssistantError(finalMessages);
     const sessionFile = process.env.PI_SUBAGENT_SESSION;
     if (errorInfo && sessionFile) {
       writeFileSync(
@@ -256,7 +261,7 @@ export default function (pi: ExtensionAPI) {
         }),
       );
     }
-    recorder.agentBeforeSettleDone();
+    recorder.agentSettledDone();
     ctx.shutdown();
   });
 
