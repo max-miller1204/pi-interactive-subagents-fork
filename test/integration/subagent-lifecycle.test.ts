@@ -58,7 +58,9 @@ for (const backend of backends) {
     it("spawns a subagent that writes a file and verifies the session", async () => {
       const id = uniqueId();
       const markerFile = `/tmp/pi-integ-echo-${id}.txt`;
+      const activityPathFile = `/tmp/pi-integ-activity-path-${id}.txt`;
       trackTempFile(env, markerFile);
+      trackTempFile(env, activityPathFile);
 
       const surface = createTrackedSurface(env, `echo-${id}`);
       await sleep(1000);
@@ -67,7 +69,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Echo-${id}"`,
         `  agent: "test-echo"`,
-        `  task: "Run this bash command: echo 'PASS_${id}' > '${markerFile}'"`,
+        `  task: "Run this bash command: echo 'PASS_${id}' > '${markerFile}'; printf '%s' \"$PI_SUBAGENT_ACTIVITY_FILE\" > '${activityPathFile}'"`,
         `Do not do anything else. Just call the subagent tool once.`,
         `After you receive the subagent result, say INTEGRATION_COMPLETE.`,
       ].join("\n");
@@ -80,6 +82,14 @@ for (const backend of backends) {
         content.includes(`PASS_${id}`),
         `Marker file should contain PASS_${id}. Got: ${content.trim()}`,
       );
+
+      // Verify: the final activity snapshot is written before the child exits.
+      const activityFile = (await waitForFile(activityPathFile, PI_TIMEOUT)).trim();
+      const activity = JSON.parse(
+        await waitForFile(activityFile, PI_TIMEOUT, /"latestEvent":"agent_before_settle"/),
+      );
+      assert.equal(activity.latestEvent, "agent_before_settle");
+      assert.equal(activity.phase, "done");
 
       // Verify: outer pi received the subagent result
       const screen = await waitForScreen(
