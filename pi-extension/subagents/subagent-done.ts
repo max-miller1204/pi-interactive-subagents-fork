@@ -4,7 +4,7 @@
  * - Provides an `ask_question` tool for asking the parent orchestrator a question
  *
  * Subagents do NOT self-terminate via a tool. Auto-exit agents shut down
- * automatically when their agent loop ends (see the `agent_end` handler);
+ * at final settlement (see the `agent_before_settle` handler);
  * interactive agents end when the human exits the pane.
  *
  * `ask_question` keeps the session OPEN: it writes a `${sessionFile}.ask`
@@ -31,7 +31,7 @@ export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
  * symbol. A subagent that spawns children and then writes a "waiting for
  * results" message would otherwise auto-exit the instant that turn ends —
  * killing the session before its children report back. Reading this count lets
- * `agent_end` keep the session open until every child has finished and its
+ * `agent_before_settle` keep the session open until every child has finished and its
  * result has been delivered.
  *
  * Returns 0 when the spawning tools aren't loaded (scout/researcher, or a
@@ -48,10 +48,7 @@ export function runningChildrenCount(): number {
   }
 }
 
-export function shouldAutoExitOnAgentEnd(
-  _userTookOver: boolean,
-  messages: any[] | undefined,
-): boolean {
+export function shouldAutoExitBeforeSettle(messages: any[] | undefined): boolean {
   // Manual input should not strand an auto-exit subagent. If the latest agent
   // turn completed normally, close the session. Escape/abort still leaves it
   // open for inspection or another prompt.
@@ -84,7 +81,7 @@ export interface SubagentErrorInfo {
  * failure instead of silently treating the run as completed.
  *
  * Returns `null` when the latest assistant turn completed normally or was
- * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
+ * aborted by the user (handled separately by shouldAutoExitBeforeSettle).
  */
 export function findLatestAssistantError(
   messages: any[] | undefined,
@@ -201,7 +198,7 @@ export default function (pi: ExtensionAPI) {
     // here, not only on agent_start, because a reply steered in *mid-run* is
     // absorbed into the current run (pi's `steer` behavior injects it before
     // the next LLM call): no new agent_start fires, so without this the flag
-    // would stay set and agent_end would park the session as `waiting` even
+    // would stay set and agent_before_settle would park the session as `waiting` even
     // though the answer already arrived and was consumed. (The `input` event
     // fires for mid-run steers because prompt() emits it before queueing.)
     awaitingAnswer = false;
@@ -223,57 +220,43 @@ export default function (pi: ExtensionAPI) {
     recorder.agentStart();
   });
 
-  pi.on("agent_end", (event, ctx) => {
-    const messages = (event as any).messages as any[] | undefined;
-    // Never shut down while this session still has work in flight:
-    //  - awaitingAnswer: an ask_question is pending the orchestrator's reply.
-    //  - runningChildrenCount(): this subagent spawned its own children and is
-    //    waiting for their results (delivered as steered turns). Exiting now
-    //    would strand those children and drop their results.
-    // In both cases the session parks as `waiting` and resumes when the next
-    // turn lands.
+  pi.on("agent_end", () => {
+    recorder.agentEndWaiting();
+  });
+
+  pi.on("agent_before_settle", (event, ctx) => {
+    const messages = event.context.contextMessages as any[];
+    // Keep this session open while it waits for an answer or child result.
+    // A low-level agent_end can occur before a retry. Only this final boundary
+    // can shut down the session or write an error sidecar.
     const hasPendingChildren = runningChildrenCount() > 0;
     const shouldExit =
+      event.outcome !== "aborted" &&
       !awaitingAnswer &&
       !hasPendingChildren &&
       autoExit &&
-      shouldAutoExitOnAgentEnd(userTookOver, messages);
+      shouldAutoExitBeforeSettle(messages);
 
-    if (shouldExit) {
-      // Surface stopReason: "error" turns (auto-retry exhausted, provider
-      // overload, etc.) to the parent via the .exit sidecar so the watcher
-      // can report a clear failure with the underlying error message.
-      // Without this the parent would only see exit code 0 and a stale
-      // assistant message, mistaking the crash for a successful completion.
-      const errorInfo = findLatestAssistantError(messages);
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (errorInfo && sessionFile) {
-        try {
-          writeFileSync(
-            `${sessionFile}.exit`,
-            JSON.stringify({
-              type: "error",
-              errorMessage: errorInfo.errorMessage,
-              stopReason: errorInfo.stopReason,
-            }),
-          );
-        } catch {
-          // Best effort — even without the sidecar, watcher's session-file
-          // fallback can still recover the errorMessage.
-        }
-      }
-
-      recorder.agentEndDone();
-      ctx.shutdown();
+    if (!shouldExit) {
+      recorder.agentBeforeSettleWaiting();
+      if (autoExit) userTookOver = false;
       return;
     }
 
-    recorder.agentEndWaiting();
-    if (autoExit) {
-      // Reset any recorded manual input marker. Auto-exit is decided by whether
-      // the latest agent turn completed normally, not by who initiated it.
-      userTookOver = false;
+    const errorInfo = findLatestAssistantError(messages);
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (errorInfo && sessionFile) {
+      writeFileSync(
+        `${sessionFile}.exit`,
+        JSON.stringify({
+          type: "error",
+          errorMessage: errorInfo.errorMessage,
+          stopReason: errorInfo.stopReason,
+        }),
+      );
     }
+    recorder.agentBeforeSettleDone();
+    ctx.shutdown();
   });
 
   pi.on("turn_start", (event) => {

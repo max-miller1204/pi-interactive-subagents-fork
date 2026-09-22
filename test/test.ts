@@ -51,7 +51,7 @@ import {
 } from "../pi-extension/subagents/activity.ts";
 import {
   shouldMarkUserTookOver,
-  shouldAutoExitOnAgentEnd,
+  shouldAutoExitBeforeSettle,
   findLatestAssistantError,
   runningChildrenCount,
 } from "../pi-extension/subagents/subagent-done.ts";
@@ -2298,28 +2298,21 @@ describe("subagent-done.ts", () => {
     });
   });
 
-  describe("shouldAutoExitOnAgentEnd", () => {
-    it("auto-exits after normal completion when there was no takeover", () => {
+  describe("shouldAutoExitBeforeSettle", () => {
+    it("auto-exits after normal completion", () => {
       const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
-    });
-
-    it("auto-exits after normal completion even when the user sent the prompt", () => {
-      const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(true, messages), true);
+      assert.equal(shouldAutoExitBeforeSettle(messages), true);
     });
 
     it("stays open after Escape aborts the run", () => {
       const messages = [{ role: "assistant", stopReason: "aborted" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
+      assert.equal(shouldAutoExitBeforeSettle(messages), false);
     });
 
     it("still exits when the latest turn ended with stopReason=error", () => {
-      // Auto-exit subagents must shut down on retry-exhaustion errors so the
-      // parent is woken. The error sidecar (written separately) carries the
-      // failure detail; staying open would just strand the worker.
+      // A final error must shut down so the parent receives the error sidecar.
       const messages = [{ role: "assistant", stopReason: "error", errorMessage: "529 overloaded" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
+      assert.equal(shouldAutoExitBeforeSettle(messages), true);
     });
   });
 
@@ -2488,8 +2481,15 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_AGENT = "scout";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
       subagentDoneExtension(api);
-      const emit = (event: string, ...args: any[]) =>
-        (handlers.get(event) ?? []).forEach((h) => h(...args));
+      const emit = async (event: string, ...args: any[]) => {
+        const results = [];
+        for (const handler of handlers.get(event) ?? []) results.push(await handler(...args));
+        return results;
+      };
+      const beforeSettle = (messages: any[], outcome = "completed") => ({
+        type: "agent_before_settle", entries: [], continue: false, outcome,
+        context: { contextMessages: messages, contextEntries: [], llmMessages: [], pendingMessages: [], canContinue: false },
+      });
       const restore = () => {
         restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
         restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
@@ -2500,35 +2500,37 @@ describe("subagent-done.ts", () => {
         const tool = tools.find((t) => t.name === "ask_question");
         await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, { shutdown() {} });
       };
-      return { emit, ask, restore };
+      return { emit, ask, restore, beforeSettle };
     }
 
-    it("exits (does not park) when the reply arrives mid-run via input", async () => {
+    it("exits at agent_before_settle when the reply arrives mid-run via input", async () => {
       const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      const { emit, ask, restore, beforeSettle } = setupCapturingExtension(join(dir, "s.jsonl"));
       try {
-        emit("agent_start");
+        await emit("agent_start");
         await ask(); // sets awaitingAnswer mid-run
-        // Reply arrives MID-RUN as a steer: input fires, no new agent_start.
-        emit("input");
+        // Reply arrives mid-run as a steer: input fires, no new agent_start.
+        await emit("input");
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
-        assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
+        await emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false, "agent_end must not shut down");
+        await emit("agent_before_settle", beforeSettle([]), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, true, "reply consumed mid-run: final boundary exits");
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
 
-    it("parks as waiting at agent_end while the reply is still pending (no input yet)", async () => {
+    it("parks at agent_before_settle while a pending question has no reply", async () => {
       const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      const { emit, ask, restore, beforeSettle } = setupCapturingExtension(join(dir, "s.jsonl"));
       try {
-        emit("agent_start");
+        await emit("agent_start");
         await ask();
-        // No input yet — the orchestrator has not replied.
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        await emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        await emit("agent_before_settle", beforeSettle([]), { shutdown() { shutdown = true; } });
         assert.equal(shutdown, false, "pending question with no reply must park, not exit");
       } finally {
         restore();
@@ -2536,21 +2538,97 @@ describe("subagent-done.ts", () => {
       }
     });
 
-    it("exits when the reply arrives as a new turn (agent_start also clears the flag)", async () => {
+    it("exits at agent_before_settle when the reply starts a new turn", async () => {
       const dir = createTestDir();
-      const { emit, ask, restore } = setupCapturingExtension(join(dir, "s.jsonl"));
+      const { emit, ask, restore, beforeSettle } = setupCapturingExtension(join(dir, "s.jsonl"));
       try {
-        emit("agent_start");
+        await emit("agent_start");
         await ask();
         let shutdown1 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown1 = true; } });
+        await emit("agent_end", { messages: [] }, { shutdown() { shutdown1 = true; } });
+        await emit("agent_before_settle", beforeSettle([]), { shutdown() { shutdown1 = true; } });
         assert.equal(shutdown1, false, "parks while waiting");
         // Reply arrives as a fresh turn after the subagent had parked.
-        emit("input");
-        emit("agent_start");
+        await emit("input");
+        await emit("agent_start");
         let shutdown2 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown2 = true; } });
-        assert.equal(shutdown2, true, "after the reply turn, agent_end should exit");
+        await emit("agent_end", { messages: [] }, { shutdown() { shutdown2 = true; } });
+        assert.equal(shutdown2, false, "agent_end must not shut down");
+        await emit("agent_before_settle", beforeSettle([]), { shutdown() { shutdown2 = true; } });
+        assert.equal(shutdown2, true, "after the reply turn, final boundary exits");
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not shut down at a low-level agent_end before retry", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "s.jsonl");
+      const { emit, restore, beforeSettle } = setupCapturingExtension(sessionFile);
+      try {
+        let shutdown = false;
+        await emit("agent_end", { messages: [{ role: "assistant", stopReason: "error" }] }, { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        await emit("agent_start");
+        await emit("agent_before_settle", beforeSettle([
+          { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+        ]), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, true);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a running child open at agent_before_settle", async () => {
+      const dir = createTestDir();
+      const key = Symbol.for("pi-subagents/running-children-count");
+      const previous = (globalThis as any)[key];
+      const { emit, restore, beforeSettle } = setupCapturingExtension(join(dir, "s.jsonl"));
+      try {
+        (globalThis as any)[key] = () => 1;
+        let shutdown = false;
+        await emit("agent_before_settle", beforeSettle([{ role: "assistant", stopReason: "stop" }]), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false);
+      } finally {
+        (globalThis as any)[key] = previous;
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps an aborted response open at agent_before_settle", async () => {
+      const dir = createTestDir();
+      const { emit, restore, beforeSettle } = setupCapturingExtension(join(dir, "s.jsonl"));
+      try {
+        let shutdown = false;
+        await emit("agent_before_settle", beforeSettle([{ role: "assistant", stopReason: "stop" }], "aborted"), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false);
+        await emit("agent_before_settle", beforeSettle([{ role: "assistant", stopReason: "aborted" }]), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false);
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("writes a final error sidecar at agent_before_settle only", async () => {
+      const dir = createTestDir();
+      const sessionFile = join(dir, "s.jsonl");
+      const { emit, restore, beforeSettle } = setupCapturingExtension(sessionFile);
+      try {
+        let shutdown = false;
+        const error = { role: "assistant", stopReason: "error", errorMessage: "529 overloaded" };
+        await emit("agent_end", { messages: [error] }, { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, false);
+        assert.equal(existsSync(`${sessionFile}.exit`), false);
+        await emit("agent_before_settle", beforeSettle([error]), { shutdown() { shutdown = true; } });
+        assert.equal(shutdown, true);
+        assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.exit`, "utf-8")), {
+          type: "error", errorMessage: "529 overloaded", stopReason: "error",
+        });
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
