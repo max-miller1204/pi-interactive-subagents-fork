@@ -37,7 +37,7 @@ The file contains a `profiles` object. Each key is a profile name. Each value ha
 }
 ```
 
-These model IDs illustrate the format. Users provide their own available models. Profile names and guidance are user-defined. A file must have at least one profile. Valid thinking levels are `minimal`, `low`, `medium`, and `high`. Reject empty names, empty guidance, extra fields, invalid levels, and malformed JSON. Resolve the model through Pi's model registry before launch. Reject an unavailable or ambiguous model. No profile is built into the extension.
+These model IDs illustrate the format. Users provide their own available models. Profile names and guidance are user-defined. A file must have at least one profile. Pi's thinking-level vocabulary includes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, but the supported set depends on the selected model. Reject empty names, empty guidance, extra fields, invalid levels, and malformed JSON. Resolve the model through Pi's model registry before launch. Reject an unavailable or ambiguous model. Check that the requested level is in `getSupportedThinkingLevels(resolvedModel)` before launch. Reject unsupported levels instead of allowing Pi to clamp them. No profile is built into the extension.
 
 Load the selected policy once for a parent session. Re-evaluate it when the extension or session starts again. The tool description and spawn validation use the same loaded policy, so file edits do not silently change the choices during a session.
 
@@ -55,8 +55,8 @@ Save the resolved model and thinking level in the existing Pi loadout snapshot. 
 
 ## Failure behavior
 
-Reject missing configuration, malformed configuration, unknown profiles, unavailable models, invalid thinking levels, and unsupported profile use on Claude CLI agents with a clear error. Do not switch to another profile, an agent-definition model, a parent model, or the global list after a project file was selected. Do not create a pane when validation fails.
+Reject missing configuration, malformed configuration, unknown profiles, unavailable models, invalid or model-unsupported thinking levels, and unsupported profile use on Claude CLI agents with a clear error. Do not switch to another profile, an agent-definition model, a parent model, or the global list after a project file was selected. Do not create a pane when validation fails.
 
 ## Verification
 
-Add unit tests for configuration precedence, full project replacement, global-only use, missing files, malformed files, invalid fields, unknown profiles, and model resolution. Test that the tool description and `subagents_list` show the selected policy. Test that Pi spawns require a profile, reject the removed `model` argument, and pass the resolved model and thinking level into the loadout snapshot. Test that Claude CLI spawns reject profiles and retain their agent-definition model. Test nested delegation and resume after the profile file changes. Update the README and example configuration to describe the policy and the changed call shape.
+Add unit tests for configuration precedence, full project replacement, global-only use, missing files, malformed files, invalid fields, unknown profiles, model resolution, and model-specific thinking support, including `off`, `xhigh`, and `max` where available. Test that the tool description and `subagents_list` show the selected policy. Test that Pi spawns require a profile, reject the removed `model` argument, and pass the resolved model and thinking level into the loadout snapshot. Test that Claude CLI spawns reject profiles and retain their agent-definition model. Test nested delegation and resume after the profile file changes. Update the README and example configuration to describe the policy and the changed call shape.
