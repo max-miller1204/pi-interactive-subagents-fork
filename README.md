@@ -115,7 +115,7 @@ You are a specialized agent that does X...
 | `available-skills` | string | Comma-separated skills to pin and load explicitly when `skill-policy: allowlist` is set |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
 | `system-prompt` | string | `append` or `replace`: pass the body as the child's `--append-system-prompt` / `--system-prompt`. Omit and the body is prepended to the task prompt instead |
-| `auto-exit` | boolean | Auto-shutdown when the agent finishes (see below) |
+| `auto-exit` | boolean | Decide exit at `agent_before_settle`; shut down at `agent_settled` (see below) |
 | `interactive` | boolean | Whether stall/recovery transitions wake the parent (see below) |
 | `cwd` | string | Default working directory |
 | `disable-model-invocation` | boolean | Hide from `subagents_list`; still spawnable by explicit name |
@@ -129,12 +129,12 @@ You are a specialized agent that does X...
 
 ### auto-exit
 
-With `auto-exit: true`, the session shuts down when the agent's turn ends — the agent just writes its final message and stops (there is no "done" tool). The last assistant message becomes the summary returned to the parent. Recommended for all autonomous agents.
+With `auto-exit: true`, `agent_before_settle` decides whether the session can exit. `agent_settled` rechecks pending work and commits shutdown after Pi finishes retries and queued continuations. A low-level `agent_end` does not trigger auto-exit because Pi may retry or continue the run after it fires. The agent writes its final message and stops (there is no "done" tool). The last assistant message becomes the summary returned to the parent. Recommended for all autonomous agents.
 
 Notes:
 
-- **Manual input does not strand an auto-exit sub-agent.** If a human types into the pane, the session still closes once that turn completes normally — only an escape/abort leaves it open.
-- **Auto-exit is suppressed while work is in flight:** the session parks as `waiting` instead of exiting when an `ask_question` is still unanswered, or when the agent's own child sub-agents are still running (a worker can stop after dispatching children and stays open until the last result returns).
+- **Manual input does not strand an auto-exit sub-agent.** If a human types into the pane, the session still closes at `agent_settled` once the run completes normally. An escape or abort leaves it open.
+- **Auto-exit is suppressed while work is in flight:** the session parks as `waiting` instead of exiting when an `ask_question` is still unanswered, or when the agent's own child sub-agents are still running (a worker can stop after dispatching children and stays open until the last result returns). A final provider error after retries produces an error result for the parent.
 
 ### interactive
 

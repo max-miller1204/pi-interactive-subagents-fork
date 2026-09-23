@@ -10,6 +10,8 @@ export type SubagentActivityEvent =
   | "before_agent_start"
   | "agent_start"
   | "agent_end"
+  | "agent_before_settle"
+  | "agent_settled"
   | "turn_start"
   | "turn_end"
   | "before_provider_request"
@@ -59,6 +61,9 @@ export interface SubagentActivityRecorder {
   agentStart(): void;
   agentEndWaiting(): void;
   agentEndDone(): void;
+  agentBeforeSettleWaiting(): void;
+  agentBeforeSettleDone(): void;
+  agentSettledDone(): void;
   turnStart(turnIndex?: number): void;
   turnEnd(turnIndex?: number): void;
   beforeProviderRequest(): void;
@@ -83,6 +88,8 @@ const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
   "before_agent_start",
   "agent_start",
   "agent_end",
+  "agent_before_settle",
+  "agent_settled",
   "turn_start",
   "turn_end",
   "before_provider_request",
@@ -226,6 +233,9 @@ function createNoopRecorder(): SubagentActivityRecorder {
     agentStart() {},
     agentEndWaiting() {},
     agentEndDone() {},
+    agentBeforeSettleWaiting() {},
+    agentBeforeSettleDone() {},
+    agentSettledDone() {},
     turnStart() {},
     turnEnd() {},
     beforeProviderRequest() {},
@@ -414,6 +424,19 @@ export function createSubagentActivityRecorder(params: {
     },
     agentEndDone() {
       markDone("agent_end");
+    },
+    agentBeforeSettleWaiting() {
+      record("agent_before_settle", (current, observedAt) => {
+        clearActiveState(current);
+        current.phase = "waiting";
+        current.waitingSince = observedAt;
+      }, "immediate");
+    },
+    agentBeforeSettleDone() {
+      markDone("agent_before_settle");
+    },
+    agentSettledDone() {
+      markDone("agent_settled");
     },
     turnStart(turnIndex) {
       record("turn_start", (current, observedAt) => {

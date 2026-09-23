@@ -17,7 +17,8 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -58,7 +59,9 @@ for (const backend of backends) {
     it("spawns a subagent that writes a file and verifies the session", async () => {
       const id = uniqueId();
       const markerFile = `/tmp/pi-integ-echo-${id}.txt`;
+      const activityPathFile = `/tmp/pi-integ-activity-path-${id}.txt`;
       trackTempFile(env, markerFile);
+      trackTempFile(env, activityPathFile);
 
       const surface = createTrackedSurface(env, `echo-${id}`);
       await sleep(1000);
@@ -67,7 +70,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Echo-${id}"`,
         `  agent: "test-echo"`,
-        `  task: "Run this bash command: echo 'PASS_${id}' > '${markerFile}'"`,
+        `  task: "Run this bash command: echo 'PASS_${id}' > '${markerFile}'; printf '%s' \"$PI_SUBAGENT_ACTIVITY_FILE\" > '${activityPathFile}'"`,
         `Do not do anything else. Just call the subagent tool once.`,
         `After you receive the subagent result, say INTEGRATION_COMPLETE.`,
       ].join("\n");
@@ -81,26 +84,45 @@ for (const backend of backends) {
         `Marker file should contain PASS_${id}. Got: ${content.trim()}`,
       );
 
-      // Verify: outer pi received the subagent result
-      const screen = await waitForScreen(
-        surface,
-        /INTEGRATION_COMPLETE|completed|Sub-agent.*"Echo/i,
-        PI_TIMEOUT,
+      // Verify: the final activity snapshot is written before the child exits.
+      const activityFile = (await waitForFile(activityPathFile, PI_TIMEOUT)).trim();
+      const activity = JSON.parse(
+        await waitForFile(activityFile, PI_TIMEOUT, /"latestEvent":"agent_settled"/),
       );
+      assert.equal(activity.latestEvent, "agent_settled");
+      assert.equal(activity.phase, "done");
 
-      // Verify: session file was created (shown in steer result)
-      const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
-      if (sessionMatch) {
-        const sessionFile = sessionMatch[1];
-        assert.ok(existsSync(sessionFile), `Subagent session file should exist: ${sessionFile}`);
+      // The activity path identifies the parent session artifact directory.
+      // Find its session file by header ID, not by screen text or pane state.
+      const parentId = basename(dirname(dirname(activityFile)));
+      const sessionDir = dirname(dirname(dirname(dirname(activityFile))));
+      const parentSession = readdirSync(sessionDir)
+        .filter((file) => file.endsWith(".jsonl"))
+        .map((file) => join(sessionDir, file))
+        .find((file) => JSON.parse(readFileSync(file, "utf8").split("\n")[0]).id === parentId);
+      assert.ok(parentSession, `Parent session ${parentId} should exist`);
 
-        const lines = readFileSync(sessionFile, "utf8").trim().split("\n");
-        assert.ok(lines.length >= 2, `Session should have ≥2 entries, got ${lines.length}`);
-
-        const header = JSON.parse(lines[0]);
-        assert.equal(header.type, "session", "First entry should be session header");
-        assert.ok(header.id, "Session header should have an id");
+      // A persisted result with exitCode 0 is written only after the child
+      // process exits and the parent watcher receives its exit status.
+      let result: any;
+      const deadline = Date.now() + PI_TIMEOUT;
+      while (Date.now() < deadline) {
+        const entries = readFileSync(parentSession, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        result = entries.find((entry) => entry.type === "custom_message" &&
+          entry.customType === "subagent_result" && entry.details?.name === `Echo-${id}`);
+        if (result) break;
+        await sleep(2000);
       }
+      assert.ok(result, "Parent session must persist the subagent_result");
+      assert.equal(result.details.exitCode, 0, "Child must exit successfully");
+      const sessionFile = result.details.sessionFile;
+      assert.ok(existsSync(sessionFile), `Subagent session file should exist: ${sessionFile}`);
+      const lines = readFileSync(sessionFile, "utf8").trim().split("\n");
+      assert.ok(lines.length >= 2, `Session should have at least two entries, got ${lines.length}`);
+      const header = JSON.parse(lines[0]);
+      assert.equal(header.type, "session");
+      assert.ok(header.id);
+      await waitForScreen(surface, /INTEGRATION_COMPLETE/, PI_TIMEOUT);
     });
 
     // ── In-progress activity snapshots ──
