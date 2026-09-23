@@ -6,7 +6,7 @@ The delegating agent selects an approved model and thinking level for each Pi su
 
 ## Scope
 
-This design applies to sub-agents launched through Pi. Claude CLI agents retain their existing launch path and agent-definition model. The new profile policy does not set Claude CLI effort.
+This extension launches Pi sub-agents only. Remove the Claude CLI launch path and its Claude-only hook, sentinel, transcript, status, and follow-up handling. Reject an agent definition with `cli: claude` with a clear error. Do not silently launch it through Pi. Keep references to Claude model names and `CLAUDE.md` where they apply to Pi models or project instructions.
 
 ## Configuration
 
@@ -43,9 +43,9 @@ Load the selected policy once for a parent session. Re-evaluate it when the exte
 
 ## Delegation flow
 
-For a Pi sub-agent, the `subagent` call must contain `agent`, `task`, and `profile`. The parent selects the profile based on the task and the guidance exposed by the extension. Replace the existing `model` tool argument with `profile`. Do not allow direct model or thinking overrides for Pi spawns. Agent-definition `model` and `thinking` values do not override the selected profile for Pi spawns. Existing role settings for tools, instructions, and other launch behavior remain in effect.
+The `subagent` call must contain `agent`, `task`, and `profile`. The parent selects the profile based on the task and the guidance exposed by the extension. Replace the existing `model` tool argument with `profile`. Do not allow direct model or thinking overrides. Agent-definition `model` and `thinking` values do not override the selected profile. Existing role settings for tools, instructions, and other launch behavior remain in effect.
 
-The tool schema keeps `profile` optional because the same tool launches Claude CLI agents. At runtime, a Pi spawn without a profile fails. A Claude CLI spawn with a profile fails. Claude CLI spawns use their agent-definition model and do not require a profile. Removing the `model` tool argument also removes direct model overrides for Claude CLI spawns.
+Make `profile` required in the tool schema. Remove the `model` tool argument. Reject unsupported `cli: claude` agent definitions before creating a pane.
 
 The `subagent` tool description shows the active profile names and guidance. `subagents_list` shows the same list. This lets a parent select a profile without a separate discovery call. Reject an invalid choice before creating a pane or session artifact. Include the selected profile name and resolved model and thinking level in the spawn result where practical.
 
@@ -55,8 +55,8 @@ Save the resolved model and thinking level in the existing Pi loadout snapshot. 
 
 ## Failure behavior
 
-Reject missing configuration, malformed configuration, unknown profiles, unavailable models, invalid or model-unsupported thinking levels, and unsupported profile use on Claude CLI agents with a clear error. Do not switch to another profile, an agent-definition model, a parent model, or the global list after a project file was selected. Do not create a pane when validation fails.
+Reject missing configuration, malformed configuration, unknown profiles, unavailable models, invalid or model-unsupported thinking levels, and `cli: claude` agent definitions with a clear error. Do not switch to another profile, an agent-definition model, a parent model, or the global list after a project file was selected. Do not create a pane when validation fails.
 
 ## Verification
 
-Add unit tests for configuration precedence, full project replacement, global-only use, missing files, malformed files, invalid fields, unknown profiles, model resolution, and model-specific thinking support, including `off`, `xhigh`, and `max` where available. Test that the tool description and `subagents_list` show the selected policy. Test that Pi spawns require a profile, reject the removed `model` argument, and pass the resolved model and thinking level into the loadout snapshot. Test that Claude CLI spawns reject profiles and retain their agent-definition model. Test nested delegation and resume after the profile file changes. Update the README and example configuration to describe the policy and the changed call shape.
+Add unit tests for configuration precedence, full project replacement, global-only use, missing files, malformed files, invalid fields, unknown profiles, model resolution, and model-specific thinking support, including `off`, `xhigh`, and `max` where available. Test that the tool description and `subagents_list` show the selected policy. Test that spawns require a profile, reject the removed `model` argument, and pass the resolved model and thinking level into the loadout snapshot. Test that `cli: claude` definitions fail before pane creation. Remove Claude-only tests, plugin files, status branches, launch code, and documentation. Test nested delegation and resume after the profile file changes. Update the README and example configuration to describe the policy and the changed call shape.
