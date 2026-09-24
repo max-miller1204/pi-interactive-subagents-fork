@@ -18,7 +18,6 @@ import {
   isMuxAvailable,
   muxSetupHint,
   createSurface,
-  sendCommand,
   sendLongCommand,
   pollForExit,
   closeSurface,
@@ -27,6 +26,13 @@ import {
   readScreen,
   type PollResult,
 } from "./tmux.ts";
+
+import {
+  SteerInboxClosedError,
+  openSteerInbox,
+  queueSteerMessage,
+  removeSteerInbox,
+} from "./steer-inbox.ts";
 
 import {
   countSessionEntryLines,
@@ -863,12 +869,17 @@ function resolveResultPresentation(
   result: Pick<
     SubagentResult,
     "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage" | "reason"
+    | "undeliveredMessages"
   >,
   name: string,
 ): string {
   // Name is the persistent handle: the same name steers a running subagent or
-  // resumes a finished one, so follow-ups always reference it.
-  const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+  // resumes a finished one, so follow-ups always reference it. Do not show a
+  // call template. A model can copy its placeholder message as a real call.
+  const undelivered = formatUndeliveredMessages(result.undeliveredMessages);
+  const sessionRef =
+    `${undelivered}\n\nFollow up with subagent_message only when you have a new instruction. ` +
+    `Use name "${name}".`;
 
   if (result.errorMessage) {
     // Auto-retry exhausted or other agent-loop error. The subagent did not
@@ -892,6 +903,16 @@ function resolveResultPresentation(
     : `Sub-agent "${name}" completed (${formatElapsed(result.elapsed)}).\n\n${result.summary}${sessionRef}`;
 }
 
+function formatUndeliveredMessages(messages: string[] | undefined): string {
+  if (!messages || messages.length === 0) return "";
+  const list = messages.map((message, index) => `${index + 1}. ${message}`).join("\n");
+  return (
+    `\n\nThe subagent exited before it read these messages:\n${list}\n` +
+    `They were not delivered. To deliver them, send them again with subagent_message. ` +
+    `That resumes the session.`
+  );
+}
+
 /**
  * Result from running a single subagent.
  */
@@ -908,6 +929,8 @@ interface SubagentResult {
   reason?: PollResult["reason"];
   /** Failure message for provider errors or a closed pane. */
   errorMessage?: string;
+  /** Messages that the subagent never read from its steer inbox. */
+  undeliveredMessages?: string[];
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
 }
@@ -1403,31 +1426,44 @@ function resolveRunningByName(name: string):
 }
 
 /**
- * Type a follow-up message into a running subagent's live pane. Newlines are
- * collapsed to spaces because each newline submits a turn in the child's TUI
- * editor; a multi-line message would otherwise fire as several partial turns.
+ * A message must contain at least one letter or digit. This rejects empty
+ * messages and placeholders such as "…", which would start a turn without an
+ * instruction.
+ */
+function messageContentError(message: string | undefined): string | null {
+  if (/[\p{L}\p{N}]/u.test(message ?? "")) return null;
+  return (
+    "`message` must contain an instruction for the subagent. " +
+    `The message ${JSON.stringify(message ?? "")} has no words.`
+  );
+}
+
+/**
+ * Queue a follow-up message in a running subagent's steer inbox.
+ * The child submits it to Pi. When the child already closed the inbox because
+ * it is exiting, return an error so the caller can resend after the result.
  */
 function steerSubagent(
   running: RunningSubagent,
   message: string,
-  send: (surface: string, command: string) => void = sendCommand,
+  queue: (sessionFile: string, message: string) => void = queueSteerMessage,
 ): { ok: true } | { error: string } {
-  const flattened = message.replace(/\s*\n\s*/g, " ").trim();
   try {
-    send(running.surface, flattened);
+    queue(running.sessionFile, message);
     return { ok: true };
-  } catch (error: any) {
+  } catch (error) {
+    if (!(error instanceof SteerInboxClosedError)) throw error;
     return {
       error:
-        `Failed to deliver message to subagent "${running.name}" via tmux: ` +
-        `${error?.message ?? String(error)}`,
+        `Subagent "${running.name}" is exiting and did not accept the message. ` +
+        `Wait for its result. Then send the message again with subagent_message to resume it.`,
     };
   }
 }
 
 function handleSubagentSteer(
   params: { name?: string; message?: string },
-  send: (surface: string, command: string) => void = sendCommand,
+  queue: (sessionFile: string, message: string) => void = queueSteerMessage,
 ) {
   const message = params.message?.trim();
   if (!message) {
@@ -1447,7 +1483,7 @@ function handleSubagentSteer(
   const now = Date.now();
   observeRunningSubagent(running, now);
 
-  const steer = steerSubagent(running, message, send);
+  const steer = steerSubagent(running, message, queue);
   if ("error" in steer) {
     return {
       content: [{ type: "text" as const, text: steer.error }],
@@ -1462,8 +1498,8 @@ function handleSubagentSteer(
     content: [{
       type: "text" as const,
       text:
-        `Message delivered to running subagent "${running.name}". It picks this up at its next ` +
-        `turn boundary. If it exits, its result still arrives as a steer message.`,
+        `Message queued for running subagent "${running.name}". It reads the message at its next ` +
+        `turn boundary. If it exits before it reads the message, its result lists the message as undelivered.`,
     }],
     details: { id: running.id, name: running.name, status: "steered" },
   };
@@ -1556,6 +1592,7 @@ export const __test__ = {
   reservedNames,
   steerSubagent,
   handleSubagentSteer,
+  messageContentError,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
   runningSubagents,
@@ -1800,6 +1837,7 @@ async function launchSubagent(
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "") || "subagent"}-${id}.sh`;
   const launchScriptFile = join(artifactDir, "subagent-scripts", launchScriptName);
+  openSteerInbox(subagentSessionFile);
   sendLongCommand(surface, command, {
     scriptPath: launchScriptFile,
     scriptPreamble: [
@@ -1863,7 +1901,7 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   const name = running.name; // unique per session (deduped at spawn) — targets the reply
   const sessionId = existsSync(running.sessionFile) ? getSessionId(running.sessionFile) : null;
   const elapsed = Math.floor((Date.now() - running.startTime) / 1000);
-  const replyHint = `\n\nReply with subagent_message({ name: "${name}", message: "…" }) — the same name works whether it is still running or has since exited. It stays open until you reply.`;
+  const replyHint = `\n\nReply with subagent_message. Use name "${name}" and put your answer in message. The same name works whether it is still running or has since exited. It stays open until you reply.`;
 
   latestPi?.sendMessage(
     {
@@ -1927,6 +1965,7 @@ async function watchSubagent(
       closeSurface(surface);
     }
     runningSubagents.delete(running.id);
+    const undeliveredMessages = removeSteerInbox(sessionFile);
 
     return {
       name,
@@ -1938,6 +1977,7 @@ async function watchSubagent(
       elapsed,
       reason: result.reason,
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+      ...(undeliveredMessages.length > 0 ? { undeliveredMessages } : {}),
       ...(stats ? { stats } : {}),
     };
   } catch (err: any) {
@@ -1945,6 +1985,7 @@ async function watchSubagent(
       closeSurface(surface);
     } catch {}
     runningSubagents.delete(running.id);
+    const undeliveredMessages = removeSteerInbox(sessionFile);
 
     if (signal.aborted) {
       return {
@@ -1955,6 +1996,7 @@ async function watchSubagent(
         elapsed: Math.floor((Date.now() - startTime) / 1000),
         error: "cancelled",
         sessionFile,
+        ...(undeliveredMessages.length > 0 ? { undeliveredMessages } : {}),
       };
     }
     return {
@@ -1964,6 +2006,7 @@ async function watchSubagent(
       exitCode: 1,
       elapsed: Math.floor((Date.now() - startTime) / 1000),
       error: err?.message ?? String(err),
+      ...(undeliveredMessages.length > 0 ? { undeliveredMessages } : {}),
     };
   }
 }
@@ -2281,6 +2324,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: result.sessionFile,
                   ...(result.sessionId ? { sessionId: result.sessionId } : {}),
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                  ...(result.undeliveredMessages ? { undeliveredMessages: result.undeliveredMessages } : {}),
                   ...(result.stats ? { stats: result.stats } : {}),
                 },
               },
@@ -2478,7 +2522,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             theme.fg("success", "✓") +
               " " +
               theme.fg("toolTitle", theme.bold(details.name ?? "subagent")) +
-              theme.fg("dim", " — message delivered"),
+              theme.fg("dim", " — message queued"),
             0,
             0,
           );
@@ -2505,6 +2549,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (!requestedName) {
           const err = "Provide the subagent's `name` to steer (if running) or resume (if finished).";
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+        }
+
+        const contentError = messageContentError(params.message);
+        if (contentError) {
+          return { content: [{ type: "text" as const, text: contentError }], details: { error: contentError } };
         }
 
         if (!isMuxAvailable()) {
@@ -2586,6 +2635,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // transcript doesn't block the UI.
         const entryCountBefore = countSessionEntryLines(sessionPath);
 
+        // Open the inbox before the pane exists. A leftover inbox fails here
+        // without a stray pane.
+        openSteerInbox(sessionPath);
         const surface = createSurface(name);
 
         // Build pi resume command
@@ -2717,6 +2769,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: sessionPath,
                   sessionId: resumedSessionId,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+                  ...(result.undeliveredMessages ? { undeliveredMessages: result.undeliveredMessages } : {}),
                 },
               },
               { triggerTurn: true, deliverAs: "steer" },
@@ -2839,7 +2892,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           .replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
           .replace(
             new RegExp(
-              `^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\(provider/agent error — auto-retry exhausted\\)\\.\\n\\n`,
+              `^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\((provider/agent error — auto-retry exhausted|pane was closed)\\)\\.\\n\\n`,
             ),
             "",
           );
@@ -2847,6 +2900,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Build content for the box
         const contentLines = [header];
         if (usageLine) contentLines.push(usageLine);
+        // Show undelivered messages in both views. The collapsed preview can hide them.
+        const undelivered: string[] = Array.isArray(details.undeliveredMessages) ? details.undeliveredMessages : [];
+        if (undelivered.length > 0) {
+          const count = undelivered.length === 1 ? "1 message was" : `${undelivered.length} messages were`;
+          contentLines.push(theme.fg("warning", `${count} not delivered: ${undelivered[0]}`.slice(0, width - 6)));
+        }
 
         if (options.expanded) {
           // Full view: complete summary + session info

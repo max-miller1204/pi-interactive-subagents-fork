@@ -1,8 +1,8 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -32,6 +32,15 @@ import {
 } from "../pi-extension/subagents/session.ts";
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import {
+  SteerInboxClosedError,
+  closeSteerInbox,
+  openSteerInbox,
+  queueSteerMessage,
+  removeSteerInbox,
+  steerInboxPath,
+  takeSteerMessages,
+} from "../pi-extension/subagents/steer-inbox.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -64,6 +73,10 @@ import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
 const CONTROL_EXTENSION = fileURLToPath(
   new URL("../pi-extension/subagents/subagent-done.ts", import.meta.url),
 );
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function createTestDir(): string {
   return mkdtempSync(join(tmpdir(), "subagents-test-"));
@@ -2534,6 +2547,7 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_NAME = "scout-2";
       process.env.PI_SUBAGENT_AGENT = "scout";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+      openSteerInbox(sessionFile);
       subagentDoneExtension(api);
       const emit = async (event: string, ...args: any[]) => {
         const results = [];
@@ -2776,6 +2790,231 @@ describe("subagent-done.ts", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("steer inbox", () => {
+  function withInbox(run: (sessionFile: string) => void) {
+    const dir = createTestDir();
+    try {
+      const sessionFile = join(dir, "child.jsonl");
+      openSteerInbox(sessionFile);
+      run(sessionFile);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("delivers queued messages in order and keeps newlines", () => {
+    withInbox((sessionFile) => {
+      queueSteerMessage(sessionFile, "first\nsecond line");
+      queueSteerMessage(sessionFile, "third");
+      assert.deepEqual(takeSteerMessages(sessionFile), ["first\nsecond line", "third"]);
+      assert.deepEqual(takeSteerMessages(sessionFile), []);
+    });
+  });
+
+  it("refuses to open an inbox that a previous run left behind", () => {
+    withInbox((sessionFile) => {
+      assert.throws(() => openSteerInbox(sessionFile), /already exists/);
+    });
+  });
+
+  it("rejects a message after the child closes an empty inbox", () => {
+    withInbox((sessionFile) => {
+      assert.deepEqual(closeSteerInbox(sessionFile), []);
+      assert.throws(() => queueSteerMessage(sessionFile, "late"), SteerInboxClosedError);
+      assert.deepEqual(takeSteerMessages(sessionFile), []);
+      const leftovers = readdirSync(dirname(sessionFile)).filter((file) => file.endsWith(".tmp"));
+      assert.deepEqual(leftovers, []);
+    });
+  });
+
+  it("returns messages that arrived before the close and opens the inbox again", () => {
+    withInbox((sessionFile) => {
+      queueSteerMessage(sessionFile, "just in time");
+      assert.deepEqual(closeSteerInbox(sessionFile), ["just in time"]);
+      assert.equal(existsSync(steerInboxPath(sessionFile)), true);
+      queueSteerMessage(sessionFile, "next");
+      assert.deepEqual(takeSteerMessages(sessionFile), ["next"]);
+    });
+  });
+
+  it("returns unread messages when the parent removes the inbox", () => {
+    withInbox((sessionFile) => {
+      queueSteerMessage(sessionFile, "never read");
+      assert.deepEqual(removeSteerInbox(sessionFile), ["never read"]);
+      assert.equal(existsSync(steerInboxPath(sessionFile)), false);
+      openSteerInbox(sessionFile);
+      assert.deepEqual(closeSteerInbox(sessionFile), []);
+      assert.deepEqual(removeSteerInbox(sessionFile), []);
+      assert.deepEqual(readdirSync(dirname(sessionFile)), []);
+    });
+  });
+});
+
+describe("subagent-done.ts steer inbox", () => {
+  function setupChild(sessionFile: string) {
+    const mock = createMockExtensionApi();
+    const saved = {
+      session: process.env.PI_SUBAGENT_SESSION,
+      autoExit: process.env.PI_SUBAGENT_AUTO_EXIT,
+    };
+    process.env.PI_SUBAGENT_SESSION = sessionFile;
+    process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+    openSteerInbox(sessionFile);
+    const steered: Array<{ message: string; options: any }> = [];
+    mock.api.sendUserMessage = (message: string, options: any) => steered.push({ message, options });
+    subagentDoneExtension(mock.api);
+    const emit = async (event: string, ...args: any[]) => {
+      for (const handler of mock.eventHandlers.get(event) ?? []) await handler(...args);
+    };
+    const beforeSettle = {
+      type: "agent_before_settle", outcome: "completed",
+      context: { contextMessages: [{ role: "assistant", stopReason: "stop" }] },
+    };
+    const restore = async () => {
+      await emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+      restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
+      restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
+    };
+    return { emit, steered, beforeSettle, restore };
+  }
+
+  function uiContext(state: { idle: boolean; streaming: boolean }) {
+    return {
+      ui: { setWidget() {} },
+      isIdle: () => state.idle,
+      get signal() { return state.streaming ? new AbortController().signal : undefined; },
+    };
+  }
+
+  it("submits inbox messages as steers while the child streams", async () => {
+    const dir = createTestDir();
+    const sessionFile = join(dir, "child.jsonl");
+    const child = setupChild(sessionFile);
+    try {
+      await child.emit("session_start", { type: "session_start" }, uiContext({ idle: false, streaming: true }));
+      queueSteerMessage(sessionFile, "line one\nline two");
+      await sleep(450);
+      assert.deepEqual(child.steered, [{ message: "line one\nline two", options: { deliverAs: "steer" } }]);
+    } finally {
+      await child.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps messages in the inbox while Pi cannot accept a prompt", async () => {
+    const dir = createTestDir();
+    const sessionFile = join(dir, "child.jsonl");
+    const child = setupChild(sessionFile);
+    const state = { idle: false, streaming: false };
+    try {
+      await child.emit("session_start", { type: "session_start" }, uiContext(state));
+      queueSteerMessage(sessionFile, "after compaction");
+      await sleep(450);
+      assert.deepEqual(child.steered, []);
+      state.idle = true;
+      await sleep(450);
+      assert.deepEqual(child.steered.map((entry) => entry.message), ["after compaction"]);
+    } finally {
+      await child.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays open when a message arrives after the exit decision", async () => {
+    const dir = createTestDir();
+    const sessionFile = join(dir, "child.jsonl");
+    const child = setupChild(sessionFile);
+    try {
+      let shutdown = false;
+      const ctx = { shutdown() { shutdown = true; }, hasPendingMessages() { return false; } };
+      await child.emit("agent_before_settle", child.beforeSettle, ctx);
+      queueSteerMessage(sessionFile, "one more thing");
+      await child.emit("agent_settled", { type: "agent_settled" }, ctx);
+      assert.equal(shutdown, false);
+      assert.deepEqual(child.steered.map((entry) => entry.message), ["one more thing"]);
+      queueSteerMessage(sessionFile, "the inbox is open again");
+    } finally {
+      await child.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes the inbox before it exits", async () => {
+    const dir = createTestDir();
+    const sessionFile = join(dir, "child.jsonl");
+    const child = setupChild(sessionFile);
+    try {
+      let shutdown = false;
+      const ctx = { shutdown() { shutdown = true; }, hasPendingMessages() { return false; } };
+      await child.emit("agent_before_settle", child.beforeSettle, ctx);
+      await child.emit("agent_settled", { type: "agent_settled" }, ctx);
+      assert.equal(shutdown, true);
+      assert.throws(() => queueSteerMessage(sessionFile, "too late"), SteerInboxClosedError);
+    } finally {
+      await child.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not exit when the poll submitted a message after the exit decision", async () => {
+    const dir = createTestDir();
+    const sessionFile = join(dir, "child.jsonl");
+    const child = setupChild(sessionFile);
+    try {
+      await child.emit("session_start", { type: "session_start" }, uiContext({ idle: true, streaming: false }));
+      let shutdown = false;
+      const ctx = { shutdown() { shutdown = true; }, hasPendingMessages() { return false; } };
+      await child.emit("agent_before_settle", child.beforeSettle, ctx);
+      queueSteerMessage(sessionFile, "picked up by the poll");
+      await sleep(450);
+      await child.emit("agent_settled", { type: "agent_settled" }, ctx);
+      assert.deepEqual(child.steered.map((entry) => entry.message), ["picked up by the poll"]);
+      assert.equal(shutdown, false);
+    } finally {
+      await child.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("subagent_message content", () => {
+  it("rejects messages without words", () => {
+    const { messageContentError } = (subagentsModule as any).__test__;
+    assert.match(messageContentError("…"), /must contain an instruction/);
+    assert.match(messageContentError("  "), /has no words/);
+    assert.match(messageContentError(undefined), /must contain an instruction/);
+    assert.equal(messageContentError("go"), null);
+    assert.equal(messageContentError("続けて"), null);
+  });
+
+  it("returns the content error from the tool before it looks up the subagent", async () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const tool = registeredTools.find((entry) => entry.name === "subagent_message");
+    const result = await tool.execute("call-1", { name: "Worker", message: "…" }, undefined, undefined, {});
+    assert.match(result.content[0].text, /must contain an instruction/);
+    assert.match(result.details.error, /has no words/);
+  });
+
+  it("lists undelivered messages in the result before the follow-up hint", () => {
+    const presentation = (subagentsModule as any).__test__.resolveResultPresentation(
+      {
+        exitCode: 0,
+        elapsed: 3,
+        summary: "Done.",
+        sessionFile: "/tmp/subagent.jsonl",
+        undeliveredMessages: ["Run the tests", "Then commit"],
+      },
+      "Worker",
+    );
+    assert.match(
+      presentation,
+      /exited before it read these messages:\n1\. Run the tests\n2\. Then commit\nThey were not delivered\./,
+    );
+    assert.ok(presentation.indexOf("They were not delivered") < presentation.indexOf("Follow up with subagent_message"));
   });
 });
 
@@ -3344,38 +3583,49 @@ describe("subagent interruption", () => {
     }
   });
 
-  it("steers a running subagent by typing into its pane (newlines flattened)", () => {
+  it("queues a steer message in the subagent's inbox without changing newlines", () => {
     const testApi = (subagentsModule as any).__test__;
-    let sentSurface = "";
-    let sentText = "";
+    let queuedSessionFile = "";
+    let queuedText = "";
     const running = makeRunning();
 
-    const result = testApi.steerSubagent(running, "do this\nthen that", (surface: string, text: string) => {
-      sentSurface = surface;
-      sentText = text;
+    const result = testApi.steerSubagent(running, "do this\nthen that", (sessionFile: string, text: string) => {
+      queuedSessionFile = sessionFile;
+      queuedText = text;
     });
 
     assert.deepEqual(result, { ok: true });
-    assert.equal(sentSurface, "pane-1");
-    assert.equal(sentText, "do this then that");
+    assert.equal(queuedSessionFile, "worker.jsonl");
+    assert.equal(queuedText, "do this\nthen that");
   });
 
-  it("returns an explicit error when steering delivery fails", () => {
+  it("returns an explicit error when the subagent already closed its inbox", () => {
     const testApi = (subagentsModule as any).__test__;
     const running = makeRunning();
 
     const result = testApi.steerSubagent(running, "hi", () => {
-      throw new Error("mux write failed");
+      throw new SteerInboxClosedError("worker.jsonl");
     });
 
-    assert.match(result.error, /Failed to deliver message/);
+    assert.match(result.error, /Subagent "Worker" is exiting and did not accept the message/);
+    assert.match(result.error, /send the message again with subagent_message/);
+  });
+
+  it("does not hide an unexpected inbox write failure", () => {
+    const testApi = (subagentsModule as any).__test__;
+    assert.throws(
+      () => testApi.steerSubagent(makeRunning(), "hi", () => {
+        throw new Error("disk full");
+      }),
+      /disk full/,
+    );
   });
 
   it("delivers a steer message and forces local status waiting", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    let sentSurface = "";
-    let sentText = "";
+    let queuedSessionFile = "";
+    let queuedText = "";
     runningMap.clear();
 
     const activeState = observeStatus(
@@ -3397,15 +3647,16 @@ describe("subagent interruption", () => {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
 
       const result = withMockedNow(20_000, () =>
-        testApi.handleSubagentSteer({ name: "Worker", message: "keep going" }, (surface: string, text: string) => {
-          sentSurface = surface;
-          sentText = text;
+        testApi.handleSubagentSteer({ name: "Worker", message: "keep going" }, (sessionFile: string, text: string) => {
+          queuedSessionFile = sessionFile;
+          queuedText = text;
         }),
       );
 
-      assert.equal(sentSurface, "pane-1");
-      assert.equal(sentText, "keep going");
-      assert.equal(result.content[0].text.includes('Message delivered to running subagent "Worker"'), true);
+      assert.equal(queuedSessionFile, "worker.jsonl");
+      assert.equal(queuedText, "keep going");
+      assert.match(result.content[0].text, /Message queued for running subagent "Worker"/);
+      assert.match(result.content[0].text, /its result lists the message as undelivered/);
       assert.deepEqual(result.details, { id: "a1", name: "Worker", status: "steered" });
       const snapshot = classifyStatus(runningMap.get("a1").statusState, 20_000);
       assert.equal(snapshot.kind, "waiting");
@@ -3428,7 +3679,7 @@ describe("subagent interruption", () => {
     }
   });
 
-  it("leaves status unchanged when steering delivery fails in the tool path", () => {
+  it("leaves status unchanged when the subagent rejects the message in the tool path", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     runningMap.clear();
@@ -3453,11 +3704,11 @@ describe("subagent interruption", () => {
 
       const result = withMockedNow(20_000, () =>
         testApi.handleSubagentSteer({ name: "Worker", message: "go" }, () => {
-          throw new Error("mux write failed");
+          throw new SteerInboxClosedError("worker.jsonl");
         }),
       );
 
-      assert.match(result.content[0].text, /Failed to deliver message/);
+      assert.match(result.content[0].text, /is exiting and did not accept the message/);
       assert.equal(classifyStatus(runningMap.get("a1").statusState, 20_000).kind, "active");
     } finally {
       runningMap.clear();
@@ -3480,7 +3731,8 @@ describe("subagent interruption", () => {
     assert.match(presentation, /failed \(exit code 130\)/);
     assert.doesNotMatch(presentation, /interrupted/);
     // Follow-ups reference the name (not the session id).
-    assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
+    assert.match(presentation, /Follow up with subagent_message only when you have a new instruction\. Use name "Worker"\./);
+    assert.doesNotMatch(presentation, /message: "…"/);
     assert.doesNotMatch(presentation, /Session id:/);
   });
 
@@ -3526,7 +3778,8 @@ describe("subagent interruption", () => {
     assert.match(presentation, /Sub-agent "Worker" failed/);
     assert.match(presentation, /provider\/agent error — auto-retry exhausted/);
     assert.match(presentation, /Error: Anthropic 529 Overloaded after 3 retries/);
-    assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
+    assert.match(presentation, /Follow up with subagent_message only when you have a new instruction\. Use name "Worker"\./);
+    assert.doesNotMatch(presentation, /message: "…"/);
     assert.doesNotMatch(presentation, /Session id:/);
     assert.doesNotMatch(presentation, /ignored when errorMessage is present/);
   });
@@ -3554,6 +3807,29 @@ describe("subagent result renderer", () => {
 
     assert.match(rendered, /failed \(pane closed\)/);
     assert.doesNotMatch(rendered, /failed \(provider\/agent error\)/);
+  });
+
+  it("shows undelivered messages and does not repeat the failure line", () => {
+    const { api, registeredMessageRenderers } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const entry = registeredMessageRenderers.find((item) => item.name === "subagent_result");
+    const theme = {
+      fg(_color: string, text: string) { return text; },
+      bg(_color: string, text: string) { return text; },
+      bold(text: string) { return text; },
+    };
+    const rendered = entry.renderer({
+      customType: "subagent_result",
+      content: 'Sub-agent "Alpha" failed after 14s (pane was closed).\n\nError: Subagent pane %42 no longer exists.',
+      details: {
+        name: "Alpha", exitCode: 1, elapsed: 14,
+        reason: "missing-pane", errorMessage: "Subagent pane %42 no longer exists.",
+        undeliveredMessages: ["Run the tests", "Then commit"],
+      },
+    }, { expanded: true }, theme).render(90).join("\n");
+
+    assert.match(rendered, /2 messages were not delivered: Run the tests/);
+    assert.doesNotMatch(rendered, /failed after 14s \(pane was closed\)/);
   });
 });
 

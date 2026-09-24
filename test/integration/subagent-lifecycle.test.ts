@@ -8,8 +8,9 @@
  * Cost depends on the configured model.
  * Duration: ~30-90s per test.
  *
- * Run inside tmux:
- *   tmux new 'npm run test:integration'
+ * Run with `npm run test:integration`.
+ * The runner starts a private tmux server for the tests.
+ * The tests do not create panes in your own tmux session.
  *
  * Configuration:
  *   PI_TEST_MODEL     - required model for profile-backed integration tests
@@ -21,6 +22,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readNameRegistry, readSubagentLoadout } from "../../pi-extension/subagents/session.ts";
+import { SteerInboxClosedError, queueSteerMessage } from "../../pi-extension/subagents/steer-inbox.ts";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -43,7 +45,7 @@ const backends = getAvailableBackends();
 
 if (backends.length === 0) {
   console.log("⚠️  tmux is not available — skipping subagent lifecycle integration tests");
-  console.log("   Run inside tmux to enable these tests.");
+  console.log("   Run with `npm run test:integration`. It starts a private tmux server.");
 }
 
 if (!TEST_MODEL) console.log("PI_TEST_MODEL is required; skipping model-backed lifecycle tests.");
@@ -170,6 +172,93 @@ for (const backend of TEST_MODEL ? backends : []) {
       const failureScreen = await waitForScreen(surface, /failed \(pane closed\)/, 30_000);
       assert.match(failureScreen, /Error: Subagent pane/);
       assert.doesNotMatch(failureScreen, /failed \(provider\/agent error\)/);
+    });
+
+    // ── Messages to a running subagent ──
+
+    it("delivers a parent message to a running subagent", async () => {
+      const id = uniqueId();
+      const startedFile = join(env.dir, `steer-started-${id}`);
+      const steeredFile = join(env.dir, `steered-${id}`);
+      const surface = createTrackedSurface(env, `steer-${id}`);
+      const name = `Steer-${id}`;
+      startPi(surface, env.dir, [
+        "Call the subagent tool once with these EXACT parameters:",
+        `  name: "${name}"`,
+        '  agent: "test-echo"',
+        '  profile: "quick"',
+        `  task: "Run this bash command: echo started > '${startedFile}'; sleep 15"`,
+        "Then wait. Do not call any other tool until I ask you to.",
+      ].join("\n"));
+
+      await waitForFile(startedFile, PI_TIMEOUT, /started/);
+      sendCommand(surface, [
+        `Call subagent_message with name: "${name}"`,
+        `and message: "After the sleep, run this bash command: echo steered > '${steeredFile}'".`,
+      ].join(" "));
+      await waitForScreen(surface, /message queued/, PI_TIMEOUT);
+      await waitForFile(steeredFile, PI_TIMEOUT, /steered/);
+    });
+
+    it("never loses a message sent while the subagent exits", async () => {
+      const id = uniqueId();
+      const sessionPathFile = join(env.dir, `racer-session-${id}`);
+      const lateFile = join(env.dir, `late-${id}`);
+      const surface = createTrackedSurface(env, `racer-${id}`);
+      const name = `Racer-${id}`;
+      startPi(surface, env.dir, [
+        "Call the subagent tool once with these EXACT parameters:",
+        `  name: "${name}"`,
+        '  agent: "test-echo"',
+        '  profile: "quick"',
+        `  task: "Run this bash command: printf '%s' \\"$PI_SUBAGENT_SESSION\\" > '${sessionPathFile}'; sleep 3. Then reply FIRST_DONE."`,
+        "After you receive every subagent result, say DONE. Do not call any other tool.",
+      ].join("\n"));
+
+      const sessionFile = (await waitForFile(sessionPathFile, PI_TIMEOUT)).trim();
+      const start = Date.now();
+      while (!/"role":"assistant".*FIRST_DONE/.test(readFileSync(sessionFile, "utf8"))) {
+        assert.ok(Date.now() - start < PI_TIMEOUT, "The subagent must write its final reply");
+        await sleep(10);
+      }
+      // Queue exactly when the final reply lands, as the parent tool does.
+      const lateMessage = `Run this bash command: echo late > '${lateFile}'`;
+      try {
+        queueSteerMessage(sessionFile, lateMessage);
+      } catch (error) {
+        // The child closed its inbox first. The sender gets an explicit error.
+        assert.ok(error instanceof SteerInboxClosedError);
+        return;
+      }
+      // The child accepted the message before it closed its inbox.
+      await waitForFile(lateFile, PI_TIMEOUT, /late/);
+    });
+
+    it("reports a message that the subagent never read", async () => {
+      const id = uniqueId();
+      const sessionPathFile = join(env.dir, `unread-session-${id}`);
+      const surface = createTrackedSurface(env, `unread-${id}`);
+      const name = `Unread-${id}`;
+      startPi(surface, env.dir, [
+        "Call the subagent tool once with these EXACT parameters:",
+        `  name: "${name}"`,
+        '  agent: "test-echo"',
+        '  profile: "quick"',
+        `  task: "Run this bash command: printf '%s' \\"$PI_SUBAGENT_SESSION\\" > '${sessionPathFile}'; sleep 90"`,
+        "After you receive the subagent result, say DONE. Do not resume or spawn another subagent.",
+      ].join("\n"));
+
+      const sessionFile = (await waitForFile(sessionPathFile, PI_TIMEOUT)).trim();
+      const childLine = execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_id} #{pane_current_path}"], {
+        encoding: "utf8",
+      }).trim().split("\n").find((line) => line.endsWith(` ${env.dir}`) && !line.startsWith(`${surface} `));
+      assert.ok(childLine, "The subagent must have a pane before manual close");
+      execFileSync("tmux", ["kill-pane", "-t", childLine.split(" ")[0]]);
+      // The watcher polls once per second. Queue before it sees the closed pane.
+      queueSteerMessage(sessionFile, `UNREAD_${id}`);
+
+      const screen = await waitForScreen(surface, new RegExp(`1 message was not delivered: UNREAD_${id}`), 30_000);
+      assert.match(screen, /failed \(pane closed\)/);
     });
 
     // ── In-progress activity snapshots ──
@@ -314,10 +403,14 @@ for (const backend of TEST_MODEL ? backends : []) {
       const surface = createTrackedSurface(env, `resume-${id}`);
       const name = `Resume-${id}`;
       startPi(surface, env.dir, [
-        `Call subagent with agent: "test-echo", profile: "quick", name: "${name}".`,
-        `Task: Run bash: echo FIRST > '${firstFile}'; printf '%s' "$PI_SUBAGENT_ACTIVITY_FILE" > '${activityPathFile}'.`,
-        `After the child result arrives, say READY_TO_RESUME and wait for instructions.`,
-      ].join(" "));
+        "Call the subagent tool once with these EXACT parameters:",
+        `  name: "${name}"`,
+        '  agent: "test-echo"',
+        '  profile: "quick"',
+        `  task: "Run bash: echo FIRST > '${firstFile}'; printf '%s' \\"$PI_SUBAGENT_ACTIVITY_FILE\\" > '${activityPathFile}'"`,
+        "When the subagent result arrives, reply READY_TO_RESUME.",
+        "Do not call subagent_message until I ask you to.",
+      ].join("\n"));
       await waitForFile(firstFile, PI_TIMEOUT, /FIRST/);
       const activityFile = (await waitForFile(activityPathFile, PI_TIMEOUT)).trim();
       const parentId = basename(dirname(dirname(activityFile)));

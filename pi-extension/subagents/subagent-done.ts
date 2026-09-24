@@ -12,12 +12,18 @@
  * signal the parent's watcher picks up, parks the session in a "waiting" state
  * (auto-exit is suppressed for that turn via `awaitingAnswer`), and the parent
  * replies with subagent_message — which lands as the subagent's next turn.
+ *
+ * Parent messages arrive through the steer inbox (see steer-inbox.ts). This
+ * extension submits them to Pi. It closes the inbox before auto-exit.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { closeSteerInbox, takeSteerMessages } from "./steer-inbox.ts";
+
+const STEER_INBOX_POLL_MS = 200;
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -183,10 +189,26 @@ export default function (pi: ExtensionAPI) {
   let awaitingAnswer = false;
   let eligibleToExit = false;
   let finalMessages: any[] | undefined;
+  let steerInboxTimer: ReturnType<typeof setInterval> | undefined;
+
+  function submitSteerMessages(messages: string[]) {
+    if (messages.length === 0) return;
+    // A message from the parent cancels a pending exit decision.
+    eligibleToExit = false;
+    for (const message of messages) pi.sendUserMessage(message, { deliverAs: "steer" });
+  }
 
   // Show widget + status bar on session start
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (!sessionFile) throw new Error("PI_SUBAGENT_SESSION environment variable is not set.");
+    steerInboxTimer = setInterval(() => {
+      // Pi rejects a prompt during manual compaction. It is then neither idle
+      // nor streaming. Keep the messages in the inbox until the next poll.
+      if (!ctx.isIdle() && ctx.signal === undefined) return;
+      submitSteerMessages(takeSteerMessages(sessionFile));
+    }, STEER_INBOX_POLL_MS);
     const tools = pi.getAllTools();
     toolNames = tools.map((t) => t.name).sort();
     denied = parseDeniedTools(deniedToolsValue);
@@ -249,9 +271,17 @@ export default function (pi: ExtensionAPI) {
     if (!eligibleToExit || awaitingAnswer || runningChildrenCount() > 0 || ctx.hasPendingMessages() ||
         !shouldAutoExitBeforeSettle(finalMessages)) return;
     eligibleToExit = false;
-    const errorInfo = findLatestAssistantError(finalMessages);
     const sessionFile = process.env.PI_SUBAGENT_SESSION;
-    if (errorInfo && sessionFile) {
+    if (!sessionFile) throw new Error("PI_SUBAGENT_SESSION environment variable is not set.");
+    // Close the inbox first. A message that arrived before the close keeps the
+    // session open. After the close, the parent rejects new messages.
+    const lateMessages = closeSteerInbox(sessionFile);
+    if (lateMessages.length > 0) {
+      submitSteerMessages(lateMessages);
+      return;
+    }
+    const errorInfo = findLatestAssistantError(finalMessages);
+    if (errorInfo) {
       writeFileSync(
         `${sessionFile}.exit`,
         JSON.stringify({
@@ -306,6 +336,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", (event) => {
+    clearInterval(steerInboxTimer);
     recorder.sessionShutdown((event as any).reason);
   });
 
