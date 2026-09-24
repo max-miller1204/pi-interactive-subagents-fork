@@ -3484,6 +3484,26 @@ describe("subagent interruption", () => {
     assert.doesNotMatch(presentation, /Session id:/);
   });
 
+  it("reports a closed pane without calling it a provider error", () => {
+    const presentation = (subagentsModule as any).__test__.resolveResultPresentation(
+      {
+        reason: "missing-pane",
+        exitCode: 1,
+        elapsed: 2,
+        summary: "Partial child output",
+        sessionFile: "/tmp/subagent.jsonl",
+        errorMessage: "Subagent pane %42 no longer exists.",
+      },
+      "Worker",
+    );
+
+    assert.match(presentation, /Sub-agent "Worker" failed/);
+    assert.match(presentation, /pane was closed/);
+    assert.match(presentation, /Subagent pane %42 no longer exists/);
+    assert.doesNotMatch(presentation, /provider\/agent error/);
+    assert.doesNotMatch(presentation, /Partial child output/);
+  });
+
   it("renders a clear provider/agent error when errorMessage is set", () => {
     // Previously, an overload retry-exhaustion produced exitCode 0 with a
     // stale summary — the orchestrator thought the subagent finished

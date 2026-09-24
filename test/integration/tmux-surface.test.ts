@@ -11,7 +11,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -400,6 +400,61 @@ for (const backend of backends) {
         try {
           execFileSync("tmux", ["kill-session", "-t", session]);
         } catch {}
+      }
+    });
+
+    it("reports failure when a running pane is manually closed", async () => {
+      const surface = createTrackedSurface(env, "manual-close-test");
+      sendLongCommand(surface, "sleep 30");
+      const resultPromise = pollForExit(surface, AbortSignal.timeout(2_000), { interval: 50 });
+
+      execFileSync("tmux", ["kill-pane", "-t", surface]);
+      untrackSurface(env, surface);
+
+      const result = await resultPromise;
+      assert.equal(result.reason, "missing-pane");
+      assert.notEqual(result.exitCode, 0);
+      assert.match(result.errorMessage ?? "", /pane.*no longer exists/i);
+    });
+
+    it("uses an exit sidecar when the pane was closed", async () => {
+      const surface = createTrackedSurface(env, "closed-with-exit-test");
+      const sessionFile = join(env.dir, "sidecar-session.jsonl");
+      writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "error", errorMessage: "Agent failed" }));
+      execFileSync("tmux", ["kill-pane", "-t", surface]);
+      untrackSurface(env, surface);
+
+      const result = await pollForExit(surface, AbortSignal.timeout(2_000), {
+        interval: 50,
+        sessionFile,
+      });
+      assert.deepEqual(result, { reason: "error", exitCode: 1, errorMessage: "Agent failed" });
+    });
+
+    it("continues watching after a brief capture error while the pane exists", async () => {
+      const surface = createTrackedSurface(env, "temporary-capture-error-test");
+      sendLongCommand(surface, "sleep 0.3; printf '%s\\n' '__SUBAGENT_DONE_0__'");
+      const actualTmux = execFileSync("which", ["tmux"], { encoding: "utf8" }).trim();
+      const bin = join(env.dir, "bin");
+      const marker = join(env.dir, "capture-failed");
+      mkdirSync(bin);
+      writeFileSync(join(bin, "tmux"), [
+        "#!/bin/sh",
+        `if [ "$1" = capture-pane ] && [ ! -e ${shellEscape(marker)} ]; then`,
+        `  touch ${shellEscape(marker)}`,
+        "  echo 'temporary capture error' >&2",
+        "  exit 1",
+        "fi",
+        `exec ${shellEscape(actualTmux)} "$@"`,
+      ].join("\n"), { mode: 0o755 });
+      const originalPath = process.env.PATH;
+      try {
+        process.env.PATH = `${bin}:${originalPath}`;
+        const result = await pollForExit(surface, AbortSignal.timeout(3_000), { interval: 50 });
+        assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+        assert.ok(existsSync(marker), "The first pane capture must fail");
+      } finally {
+        process.env.PATH = originalPath;
       }
     });
 

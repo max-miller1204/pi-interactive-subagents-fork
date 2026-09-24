@@ -306,10 +306,10 @@ export function closeSurface(surface: string): void {
 
 export interface PollResult {
   /** How the subagent exited */
-  reason: "done" | "sentinel" | "error";
+  reason: "done" | "sentinel" | "error" | "missing-pane";
   /** Shell exit code (from sentinel). 0 for file-based exits. */
   exitCode: number;
-  /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
+  /** Failure message for an agent error or a missing pane. */
   errorMessage?: string;
 }
 
@@ -380,7 +380,7 @@ export async function pollForExit(
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
       }
     } catch {
-      // Surface may have been destroyed — check if .exit file appeared in the meantime
+      // The sidecar can appear while capture-pane runs. Keep its result first.
       if (options.sessionFile) {
         try {
           const exitFile = `${options.sessionFile}.exit`;
@@ -390,6 +390,23 @@ export async function pollForExit(
             return interpretExitSidecar(data);
           }
         } catch {}
+      }
+
+      // A capture error alone does not prove the pane is gone.
+      // If tmux cannot list panes, retry instead of reporting a missing pane.
+      try {
+        const { stdout } = await execFileAsync(
+          "tmux", ["list-panes", "-a", "-F", "#{pane_id}"], { encoding: "utf8" },
+        );
+        if (!stdout.split("\n").includes(surface)) {
+          return {
+            reason: "missing-pane",
+            exitCode: 1,
+            errorMessage: `Subagent pane ${surface} no longer exists.`,
+          };
+        }
+      } catch {
+        // Pane presence is unknown. Try the next poll.
       }
     }
 

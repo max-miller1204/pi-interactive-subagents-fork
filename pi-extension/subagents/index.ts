@@ -24,6 +24,7 @@ import {
   closeSurface,
   shellEscape,
   readScreen,
+  type PollResult,
 } from "./tmux.ts";
 
 import {
@@ -860,7 +861,7 @@ function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
 function resolveResultPresentation(
   result: Pick<
     SubagentResult,
-    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage"
+    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage" | "reason"
   >,
   name: string,
 ): string {
@@ -873,9 +874,12 @@ function resolveResultPresentation(
     // produce a usable result — surface the underlying provider/network
     // failure so the orchestrator can decide whether to retry, resume, or
     // change approach instead of silently treating the run as completed.
+    const cause = result.reason === "missing-pane"
+      ? "pane was closed"
+      : "provider/agent error — auto-retry exhausted";
     return (
       `Sub-agent "${name}" failed after ${formatElapsed(result.elapsed)} ` +
-      `(provider/agent error — auto-retry exhausted).\n\n` +
+      `(${cause}).\n\n` +
       `Error: ${result.errorMessage}\n\n` +
       `The subagent did not produce a result. You can retry by spawning a new ` +
       `subagent or resume the session with subagent_message.${sessionRef}`
@@ -900,7 +904,8 @@ interface SubagentResult {
   exitCode: number;
   elapsed: number;
   error?: string;
-  /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
+  reason?: PollResult["reason"];
+  /** Failure message for provider errors or a closed pane. */
   errorMessage?: string;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
@@ -1915,7 +1920,7 @@ async function watchSubagent(
     const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
     const subagentSessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
 
-    closeSurface(surface);
+    if (result.reason !== "missing-pane") closeSurface(surface);
     runningSubagents.delete(running.id);
 
     return {
@@ -1926,6 +1931,7 @@ async function watchSubagent(
       ...(subagentSessionId ? { sessionId: subagentSessionId } : {}),
       exitCode: result.exitCode,
       elapsed,
+      reason: result.reason,
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       ...(stats ? { stats } : {}),
     };
