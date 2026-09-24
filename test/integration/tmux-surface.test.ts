@@ -318,7 +318,7 @@ for (const backend of backends) {
       }
     });
 
-    it("keeps the repository Pi selected for child launches", async () => {
+    it("uses the dots-managed Pi for parent and child launches", async () => {
       const surface = createTrackedSurface(env, "pi-selection-test");
       const fakeBinDir = join(env.dir, "fake-bin");
       const markerFile = join(env.dir, "pi-selection.json");
@@ -338,13 +338,15 @@ for (const backend of backends) {
         });
 
         const report = JSON.parse(await waitForFile(markerFile, 15_000));
-        const expectedVersion = execFileSync(PI_EXECUTABLE, ["--version"], {
+        const localBin = join(fileURLToPath(new URL("../..", import.meta.url)), "node_modules", ".bin");
+        const externalPath = (previousPath ?? "").split(":").filter((dir) => dir !== localBin).join(":");
+        const globalPi = execFileSync("which", ["pi"], {
           encoding: "utf8",
+          env: { ...process.env, PATH: externalPath },
         }).trim();
-        assert.deepEqual(report, {
-          executable: PI_EXECUTABLE,
-          version: expectedVersion,
-        });
+        const expectedVersion = execFileSync(globalPi, ["--version"], { encoding: "utf8" }).trim();
+        assert.deepEqual(report, { executable: globalPi, version: expectedVersion });
+        assert.equal(PI_EXECUTABLE, globalPi);
       } finally {
         if (previousPath === undefined) delete process.env.PATH;
         else process.env.PATH = previousPath;

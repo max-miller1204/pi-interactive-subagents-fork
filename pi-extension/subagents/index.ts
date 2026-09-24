@@ -10,7 +10,6 @@ import {
   writeFileSync,
   existsSync,
   mkdirSync,
-  copyFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -710,20 +709,6 @@ function resolveLaunchModel(
   return `${activeModel.provider}/${activeModel.id}`;
 }
 
-function resolveCliLaunchModel(
-  cli: "pi" | "claude",
-  requestedModel: string | undefined,
-  agentModel: string | undefined,
-  activeModel: { provider: string; id: string } | undefined,
-): string | undefined {
-  if (cli === "pi") return resolveLaunchModel(requestedModel, agentModel, activeModel);
-  const configuredModel = requestedModel ?? agentModel;
-  if (configuredModel !== undefined && configuredModel.trim().length === 0) {
-    throw new Error("Subagent model must not be empty");
-  }
-  return configuredModel;
-}
-
 function resolveLaunchBehavior(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
@@ -776,6 +761,10 @@ function loadAgentDefaults(agentName: string): AgentDefaults | null {
   }
 
   return null;
+}
+
+function requirePiAgent(defs: AgentDefaults): void {
+  if (defs.cli === "claude") throw new Error("cli: claude is not supported; use a Pi agent");
 }
 
 function formatElapsed(seconds: number): string {
@@ -933,7 +922,6 @@ interface SubagentResult {
   sessionFile?: string;
   /** Canonical session header id, used for follow-ups via subagent_message. */
   sessionId?: string;
-  claudeSessionId?: string;
   exitCode: number;
   elapsed: number;
   error?: string;
@@ -963,8 +951,6 @@ interface RunningSubagent {
     error?: string;
   };
   abortController?: AbortController;
-  cli?: string;
-  sentinelFile?: string;
   statusState: SubagentStatusState;
   /**
    * When true, status transitions (stalled/recovered) do not wake the parent
@@ -973,10 +959,6 @@ interface RunningSubagent {
    * subagent's pane (e.g. planner).
    */
   interactive: boolean;
-}
-
-function hasResumablePiSession(subagent: Pick<RunningSubagent, "cli">): boolean {
-  return subagent.cli !== "claude";
 }
 
 /** All currently running subagents, keyed by id. */
@@ -1084,11 +1066,7 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const icon = widgetIcon(snapshot.kind);
     const left = ` ${icon} ${elapsed}  ${agent.name}${agentTag} `;
-    const right = statusConfig.enabled
-      ? formatWidgetRightLabel(snapshot)
-      : agent.cli === "claude"
-        ? " running… "
-        : " starting… ";
+    const right = statusConfig.enabled ? formatWidgetRightLabel(snapshot) : " starting… ";
 
     lines.push(borderLine(left, right, width));
   }
@@ -1355,8 +1333,6 @@ function activityLabel(activity: SubagentActivityState): string | undefined {
 }
 
 function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now()) {
-  if (running.cli === "claude") return;
-
   const activityFile = running.activityFile;
   const read: ActivityReadResult = activityFile
     ? readSubagentActivityFile(activityFile, running.id)
@@ -1574,11 +1550,11 @@ export const __test__ = {
   borderLine,
   renderSubagentWidgetLines,
   loadAgentDefaults,
+  requirePiAgent,
   discoverAgentDefinitions,
   getAgentConfigDir,
   resolveEffectiveSessionMode,
   resolveLaunchModel,
-  resolveCliLaunchModel,
   resolveModelProviderExtension,
   resolveRuntimeModel,
   resolveLaunchBehavior,
@@ -1599,7 +1575,6 @@ export const __test__ = {
   handleSubagentSteer,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
-  hasResumablePiSession,
   runningSubagents,
   formatElapsed,
   formatTokens,
@@ -1641,32 +1616,22 @@ async function launchSubagent(
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const cli = agentDefs?.cli === "claude" ? "claude" : "pi";
-  const effectiveModel = resolveCliLaunchModel(cli, params.model, agentDefs?.model, ctx.model);
-  const runtimeModel = cli === "pi" ? resolveRuntimeModel(effectiveModel, ctx.modelRegistry) : null;
-  const modelProviderExtension =
-    runtimeModel ? resolveModelProviderExtension(runtimeModel) : null;
+  if (agentDefs) requirePiAgent(agentDefs);
+  const effectiveModel = resolveLaunchModel(params.model, agentDefs?.model, ctx.model);
+  const runtimeModel = resolveRuntimeModel(effectiveModel, ctx.modelRegistry);
+  const modelProviderExtension = resolveModelProviderExtension(runtimeModel);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
-  if (
-    cli === "claude" &&
-    (agentDefs?.skillPolicy !== undefined || (agentDefs?.availableSkills?.length ?? 0) > 0)
-  ) {
-    throw new Error("skill-policy and available-skills are supported only for Pi subagents");
-  }
-  const skillSandbox = cli === "pi"
-    ? resolveSkillSandbox(
-        agentDefs?.skillPolicy,
-        effectiveSkills,
-        agentDefs?.availableSkills,
-      )
-    : { policy: "all" as const, skillPaths: {} };
+  const skillSandbox = resolveSkillSandbox(
+    agentDefs?.skillPolicy,
+    effectiveSkills,
+    agentDefs?.availableSkills,
+  );
   const effectiveThinking = agentDefs?.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
-  const defaultTools =
-    cli === "pi" && effectiveTools === undefined ? latestPi?.getActiveTools() : undefined;
-  if (cli === "pi" && effectiveTools === undefined && defaultTools === undefined) {
+  const defaultTools = effectiveTools === undefined ? latestPi?.getActiveTools() : undefined;
+  if (effectiveTools === undefined && defaultTools === undefined) {
     throw new Error("Cannot launch subagent without snapshotting the active parent tools");
   }
   const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, {
@@ -1676,7 +1641,7 @@ async function launchSubagent(
   let toolExtensions: Record<string, string> = {};
   let nativeTools: string[] = [];
 
-  if (toolAllowlist && cli === "pi") {
+  if (toolAllowlist) {
     const resolution = resolveToolExtensionManifest(toolAllowlist);
     if (resolution.unresolved.length > 0) {
       throw new Error(
@@ -1747,76 +1712,7 @@ async function launchSubagent(
   const fullTask = inheritsConversationContext
     ? params.task
     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
-  // ── Claude Code CLI path ──
-  if (cli === "claude") {
-    const sentinelFile = `/tmp/pi-claude-${id}-done`;
-    const pluginDir = join(SUBAGENTS_DIR, "plugin");
-
-    const cmdParts: string[] = [];
-    cmdParts.push(`PI_CLAUDE_SENTINEL=${shellEscape(sentinelFile)}`);
-    cmdParts.push("claude");
-    cmdParts.push("--dangerously-skip-permissions");
-
-    if (existsSync(pluginDir)) {
-      cmdParts.push("--plugin-dir", shellEscape(pluginDir));
-    }
-
-    if (effectiveModel) {
-      cmdParts.push("--model", shellEscape(effectiveModel));
-    }
-
-    const sp = agentDefs.body;
-    if (sp) {
-      cmdParts.push("--append-system-prompt", shellEscape(sp));
-    }
-
-    // Always pass the task as the prompt — even for resumed sessions,
-    // the caller's task is the follow-up instruction.
-    cmdParts.push(shellEscape(params.task));
-
-    const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
-    const command = `${cdPrefix}${cmdParts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
-
-    const launchScriptName = `${(params.name || "subagent")
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, "")
-      .replace(/\s+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "") || "subagent"}-${id}.sh`;
-    const launchScriptFile = join(artifactDir, "subagent-scripts", launchScriptName);
-
-    sendLongCommand(surface, command, {
-      scriptPath: launchScriptFile,
-      scriptPreamble: [
-        `# Claude Code subagent launch script for ${params.name}`,
-        `# Generated: ${new Date().toISOString()}`,
-        `# Surface: ${surface}`,
-      ].join("\n"),
-    });
-
-    const running: RunningSubagent = {
-      id,
-      name: params.name,
-      task: params.task,
-      agent: params.agent,
-      surface,
-      startTime,
-      sessionFile: subagentSessionFile,
-      launchScriptFile,
-      cli: "claude",
-      sentinelFile,
-      interactive: effectiveInteractive,
-      statusState: createStatusState({
-        source: "claude",
-        startTimeMs: startTime,
-      }),
-    };
-
-    runningSubagents.set(id, running);
-    return running;
-  }
-
-  if (!runtimeModel || !toolAllowlist) {
+  if (!toolAllowlist) {
     throw new Error("Cannot launch subagent without an exact model and tool snapshot");
   }
 
@@ -1956,27 +1852,6 @@ async function launchSubagent(
  * the summary from the session file, cleans up the surface,
  * and removes the entry from runningSubagents.
  */
-const CLAUDE_SESSIONS_DIR = join(
-  process.env.HOME ?? "/tmp",
-  ".pi", "agent", "sessions", "claude-code",
-);
-
-function copyClaudeSession(sentinelFile: string): string | null {
-  try {
-    const transcriptFile = sentinelFile + ".transcript";
-    if (!existsSync(transcriptFile)) return null;
-    const transcriptPath = readFileSync(transcriptFile, "utf-8").trim();
-    if (!transcriptPath || !existsSync(transcriptPath)) return null;
-    mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true });
-    const filename = transcriptPath.split("/").pop() ?? `claude-${Date.now()}.jsonl`;
-    const dest = join(CLAUDE_SESSIONS_DIR, filename);
-    copyFileSync(transcriptPath, dest);
-    return filename;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Detect an `ask_question` signal from a still-running subagent and notify the
  * orchestrator without ending the subagent. Each subagent has its own
@@ -2029,7 +1904,6 @@ async function watchSubagent(
     const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
       interval: 1000,
       sessionFile,
-      sentinelFile: running.sentinelFile,
       onTick() {
         observeRunningSubagent(running);
         deliverPendingQuestion(running);
@@ -2037,42 +1911,6 @@ async function watchSubagent(
     });
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
-
-    if (running.cli === "claude") {
-      // Claude Code result extraction
-      let summary = "";
-
-      if (running.sentinelFile) {
-        try {
-          summary = readFileSync(running.sentinelFile, "utf-8").trim();
-        } catch {}
-      }
-
-      if (!summary) {
-        summary = readScreen(surface, 200)
-          .replace(/__SUBAGENT_DONE_\d+__/, "")
-          .trimEnd();
-      }
-
-      if (!summary) {
-        summary = result.exitCode !== 0
-          ? `Claude Code exited with code ${result.exitCode}`
-          : "Claude Code exited without output";
-      }
-
-      // Copy Claude session transcript
-      let sessionId: string | null = null;
-      if (running.sentinelFile) {
-        sessionId = copyClaudeSession(running.sentinelFile);
-        try { unlinkSync(running.sentinelFile); } catch {}
-        try { unlinkSync(running.sentinelFile + ".transcript"); } catch {}
-      }
-
-      closeSurface(surface);
-      runningSubagents.delete(running.id);
-
-      return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
-    }
 
     // Pi subagent result extraction
     let summary: string;
@@ -2380,15 +2218,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           if (reservedName) reservedNames.delete(reservedName);
         }
 
-        // Persist Pi-backed sessions so subagent_message({ name }) can resume
-        // them after completion or a parent restart. Claude CLI sessions do not
-        // expose a Pi session file; they remain messageable only while running.
-        if (hasResumablePiSession(running)) {
-          registerName(parentArtifactDir, running.name, {
-            sessionFile: running.sessionFile,
-            sessionId: getSessionId(running.sessionFile),
-          });
-        }
+        // Persist the session so subagent_message can resume it after completion.
+        registerName(parentArtifactDir, running.name, {
+          sessionFile: running.sessionFile,
+          sessionId: getSessionId(running.sessionFile),
+        });
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
@@ -2420,7 +2254,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: result.sessionFile,
                   ...(result.sessionId ? { sessionId: result.sessionId } : {}),
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-                  ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
                   ...(result.stats ? { stats: result.stats } : {}),
                 },
               },
@@ -2587,7 +2420,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       description:
         "Send a message to a subagent by name. Pi-backed names persist after a subagent finishes, " +
         "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
-        "if its Pi session has finished, your message resumes that session and continues it. Claude CLI agents can only be messaged while running. " +
+        "if its Pi session has finished, your message resumes that session and continues it. " +
         "`name` and `message` are both required. " +
         "Steering a running subagent returns immediately with a local acknowledgement and does NOT, by itself, emit a new result. " +
         "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +

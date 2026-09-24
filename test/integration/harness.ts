@@ -54,10 +54,14 @@ export {
 const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HARNESS_DIR, "../..");
 const PROJECT_BIN_DIR = join(PROJECT_ROOT, "node_modules", ".bin");
+const GLOBAL_PI_PATH = (process.env.PATH ?? "").split(":").filter((dir) => dir !== PROJECT_BIN_DIR).join(":");
 const TEST_AGENTS_SRC = join(HARNESS_DIR, "agents");
 
-/** Repository-local Pi CLI used by all integration tests. */
-export const PI_EXECUTABLE = join(PROJECT_BIN_DIR, "pi");
+/** Dots-managed Pi CLI used by all integration tests. */
+export const PI_EXECUTABLE = execFileSync("which", ["pi"], {
+  encoding: "utf8",
+  env: { ...process.env, PATH: GLOBAL_PI_PATH },
+}).trim();
 
 /**
  * Absolute path to the extension source in the working tree.
@@ -267,9 +271,8 @@ export function startPi(
   // against whatever version is checked out under `~/.pi/agent/git/...`.
   const cmd = [
     `cd ${shellEscape(testDir)} &&`,
-    // Use an absolute executable for this launch. Put the same executable first
-    // on PATH so subagents that run `pi` inherit the selected CLI.
-    `PATH=${shellEscape(PROJECT_BIN_DIR)}:"$PATH" ${shellEscape(PI_EXECUTABLE)}`,
+    // Exclude the repository Pi so children use the selected global CLI.
+    `PATH=${shellEscape(GLOBAL_PI_PATH)} ${shellEscape(PI_EXECUTABLE)}`,
     `-ne`,
     `-e ${shellEscape(EXTENSION_SOURCE)}`,
     model ? `--model ${shellEscape(model)}` : "",

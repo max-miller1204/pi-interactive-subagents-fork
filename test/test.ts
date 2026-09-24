@@ -905,12 +905,10 @@ describe("status.ts", () => {
     assert.equal(snapshot.waitingDurationText, "3m");
   });
 
-  it("uses elapsed-only fallback for claude-backed subagents", () => {
-    const state = createStatusState({ source: "claude", startTimeMs: 0 });
-    const snapshot = classifyStatus(state, 125_000);
-
-    assert.equal(snapshot.kind, "running");
-    assert.equal(snapshot.elapsedText, "2m");
+  it("starts Pi subagents in the starting state", () => {
+    const state = createStatusState({ source: "pi", startTimeMs: 0 });
+    assert.equal(state.source, "pi");
+    assert.equal(classifyStatus(state, 0).kind, "starting");
   });
 
   it("detects stalled transitions and recovery", () => {
@@ -1296,6 +1294,11 @@ describe("subagent discovery", () => {
         `${name} should resolve as non-interactive (autonomous, auto-exit)`,
       );
     }
+  });
+
+  it("rejects a Claude CLI agent before launch", () => {
+    assert.throws(() => testApi.requirePiAgent({ cli: "claude" }), /cli: claude is not supported/);
+    assert.doesNotThrow(() => testApi.requirePiAgent({ cli: undefined }));
   });
 
   it("worker is granted the spawning toolset restricted to scout and researcher", () => {
@@ -1835,22 +1838,6 @@ describe("subagent discovery", () => {
     assert.throws(
       () => testApi.resolveLaunchModel(undefined, undefined, undefined),
       /without an active parent model/,
-    );
-  });
-
-  it("does not pass the active Pi model to Claude CLI", () => {
-    const activeModel = { provider: "openrouter", id: "z-ai/glm-5.3" };
-    assert.equal(
-      testApi.resolveCliLaunchModel("claude", undefined, undefined, activeModel),
-      undefined,
-    );
-    assert.equal(
-      testApi.resolveCliLaunchModel("claude", "sonnet", undefined, activeModel),
-      "sonnet",
-    );
-    assert.equal(
-      testApi.resolveCliLaunchModel("pi", undefined, undefined, activeModel),
-      "openrouter/z-ai/glm-5.3",
     );
   });
 
@@ -2805,13 +2792,6 @@ describe("tool registration", () => {
       autoExit: true,
       interactive: false,
     });
-  });
-
-  it("persists resumable names only for Pi-backed sessions", () => {
-    const testApi = (subagentsModule as any).__test__;
-    assert.equal(testApi.hasResumablePiSession({}), true);
-    assert.equal(testApi.hasResumablePiSession({ cli: "pi" }), true);
-    assert.equal(testApi.hasResumablePiSession({ cli: "claude" }), false);
   });
 
   it("rejects a top-level spawn with no agent and no fork", async () => {
