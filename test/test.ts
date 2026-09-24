@@ -2195,6 +2195,31 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("refreshes profile descriptions when a new session starts", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      const path = join(projectDir, ".pi", "subagent-profiles.json");
+      writeFileSync(path, JSON.stringify({ profiles: {
+        quick: { model: "test/quick", thinking: "off", guidance: "First session" },
+      } }));
+      const { api, eventHandlers, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      assert.match(registeredTools.find((tool) => tool.name === "subagent").description, /quick: First session/);
+      writeFileSync(path, JSON.stringify({ profiles: {
+        deep: { model: "test/deep", thinking: "high", guidance: "Next session" },
+      } }));
+      for (const handler of eventHandlers.get("session_start") ?? []) {
+        await handler({ reason: "new" }, { cwd: projectDir, hasUI: false });
+      }
+      const spawn = registeredTools.filter((tool) => tool.name === "subagent").at(-1);
+      const list = registeredTools.filter((tool) => tool.name === "subagents_list").at(-1);
+      assert.match(spawn.description, /deep: Next session/);
+      assert.doesNotMatch(spawn.description, /quick: First session/);
+      assert.match(spawn.promptSnippet, /deep: Next session/);
+      assert.deepEqual(Object.keys((await list.execute()).details.profiles), ["deep"]);
+    });
+  });
+
   it("lists profiles even when no agent definitions are visible", async () => {
     await withIsolatedAgentEnv(async ({ globalDir, projectAgentsDir }) => {
       writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
@@ -2906,6 +2931,21 @@ describe("tool registration", () => {
     const choices = ["quick", "deep"].map((name) => testApi.prepareProfileSpawn(policy, name, registry));
     assert.deepEqual(choices.map((choice: any) => [choice.model.id, choice.thinking]), [["plain", "off"], ["deep", "high"]]);
     assert.throws(() => testApi.prepareProfileSpawn({ ...policy, profiles: { bad: { ...policy.profiles.quick, thinking: "high" } } }, "bad", registry), /supports off/);
+  });
+
+  it("rejects obsolete model and unknown spawn arguments", async () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const spawn = registeredTools.find((tool) => tool.name === "subagent");
+    assert.equal(spawn.parameters.additionalProperties, false);
+    await assert.rejects(
+      () => spawn.execute("call-1", { agent: "scout", task: "Read code", profile: "quick", model: "test/other" }),
+      /Unsupported subagent parameter "model"/,
+    );
+    await assert.rejects(
+      () => spawn.execute("call-2", { agent: "scout", task: "Read code", profile: "quick", thinking: "high" }),
+      /Unsupported subagent parameter "thinking"/,
+    );
   });
 
   it("renders partial subagent tool-call args without throwing", () => {

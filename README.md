@@ -70,7 +70,7 @@ A repository can put its own policy at `.pi/subagent-profiles.json`. The reposit
 }
 ```
 
-The parent agent selects one profile on every spawn. The `subagent` tool and `subagents_list` show the active names and guidance. Pi checks whether each profile's model is available and whether that model supports the requested thinking level. Supported levels depend on the model and may include `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Pi does not change an unsupported level to another level. A missing, invalid, or unknown policy stops a spawn before pane creation. Reload Pi to read policy file changes for new spawns.
+The parent agent selects one profile on every spawn. The `subagent` tool and `subagents_list` show the active names and guidance. Pi checks whether each profile's model is available and whether that model supports the requested thinking level. Supported levels depend on the model and may include `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Pi does not change an unsupported level to another level. A missing, invalid, or unknown policy stops a spawn before pane creation. Policy file changes take effect when a new Pi session starts or when you reload Pi. An active session keeps its loaded choices.
 
 The selected model and thinking level are saved in the child's loadout snapshot. Resume uses those saved values even if the policy file changes or is removed. Agent roles control tools and instructions. They do not select a model or thinking level. Direct `model` overrides are not supported.
 

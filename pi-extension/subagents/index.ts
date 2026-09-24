@@ -120,7 +120,7 @@ const SubagentParams = Type.Object({
         "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config and CLAUDE.md. Skill and extension policies still apply. Use for role-specific subfolders.",
     }),
   ),
-});
+}, { additionalProperties: false });
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 type SkillPolicy = "all" | "allowlist" | "none";
@@ -2008,20 +2008,26 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
   let policy: ProfilePolicy | undefined;
   let policyError: Error | undefined;
-  try {
-    policy = loadProfilePolicy(process.cwd(), getAgentConfigDir());
-  } catch (error) {
-    policyError = error as Error;
+  let profileGuidance = "";
+  function refreshPolicy(cwd: string): void {
+    try {
+      policy = loadProfilePolicy(cwd, getAgentConfigDir());
+      policyError = undefined;
+    } catch (error) {
+      policy = undefined;
+      policyError = error as Error;
+    }
+    const profileText = policyError
+      ? `Profile policy error: ${policyError.message}`
+      : describeProfiles(requirePolicy());
+    profileGuidance = `Active profiles (select one per spawn):\n${profileText}`;
   }
   function requirePolicy(): ProfilePolicy {
     if (policyError) throw policyError;
     if (!policy) throw new Error("Subagent profile policy was not loaded");
     return policy;
   }
-  const profileText = policyError
-    ? `Profile policy error: ${policyError.message}`
-    : describeProfiles(requirePolicy());
-  const profileGuidance = `Active profiles (select one per spawn):\n${profileText}`;
+  refreshPolicy(process.cwd());
   // Capture the UI context for widget updates
   pi.on("session_start", (event, ctx) => {
     const lifecycleErrors: string[] = [];
@@ -2048,6 +2054,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       COMPATIBILITY_REGISTRY_LIFECYCLE.stagedProviders.clear();
     }
     latestCtx = ctx;
+    refreshPolicy(ctx.cwd);
+    registerSubagentTool();
+    registerSubagentsListTool();
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -2090,7 +2099,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // + explicit -e). See launchSubagent().
 
   // ── subagent tool ──
-  pi.registerTool({
+  function registerSubagentTool(): void {
+    pi.registerTool({
       name: "subagent",
       label: "Subagent",
       description:
@@ -2110,6 +2120,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        for (const key of Object.keys(params)) {
+          if (!Object.hasOwn(SubagentParams.properties, key)) {
+            throw new Error(`Unsupported subagent parameter "${key}"`);
+          }
+        }
         // Prevent self-spawning (e.g. planner spawning another planner)
         const currentAgent = process.env.PI_SUBAGENT_AGENT;
         if (params.agent && currentAgent && params.agent === currentAgent) {
@@ -2360,9 +2375,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return new Text(theme.fg("dim", text), 0, 0);
       },
     });
+  }
+  registerSubagentTool();
 
   // ── subagents_list tool ──
-  pi.registerTool({
+  function registerSubagentsListTool(): void {
+    pi.registerTool({
       name: "subagents_list",
       label: "List Subagents",
       description:
@@ -2400,8 +2418,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return new Text(`${lines.join("\n") || "No subagent definitions found."}\n${profileGuidance}`, 0, 0);
       },
     });
-
-
+  }
+  registerSubagentsListTool();
 
   // ── subagent_message tool ──
   pi.registerTool({
