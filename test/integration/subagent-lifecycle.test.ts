@@ -143,6 +143,35 @@ for (const backend of TEST_MODEL ? backends : []) {
       await waitForScreen(surface, /INTEGRATION_COMPLETE/, PI_TIMEOUT);
     });
 
+    it("reports a pane-closed failure after a manual pane close", async () => {
+      const id = uniqueId();
+      const startedFile = join(env.dir, `started-${id}`);
+      const surface = createTrackedSurface(env, `manual-close-${id}`);
+      const name = `Closed-${id}`;
+      startPi(surface, env.dir, [
+        "Call the subagent tool once with these EXACT parameters:",
+        `  name: "${name}"`,
+        '  agent: "test-echo"',
+        '  profile: "quick"',
+        `  task: "Run this bash command: echo started > '${startedFile}'; sleep 90"`,
+        "After you receive the subagent result, say DONE. Do not resume or spawn another subagent.",
+      ].join("\n"));
+
+      await waitForFile(startedFile, PI_TIMEOUT, /started/);
+      const paneLines = execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_id} #{pane_current_path}"], {
+        encoding: "utf8",
+      }).trim().split("\n");
+      const childLine = paneLines.find((line) => line.endsWith(` ${env.dir}`) && !line.startsWith(`${surface} `));
+      assert.ok(childLine, "The subagent must have a pane before manual close");
+      assert.match(readScreen(surface, 50), /Subagents.*running/);
+      const childPane = childLine.split(" ")[0];
+      execFileSync("tmux", ["kill-pane", "-t", childPane]);
+
+      const failureScreen = await waitForScreen(surface, /failed \(pane closed\)/, 30_000);
+      assert.match(failureScreen, /Error: Subagent pane/);
+      assert.doesNotMatch(failureScreen, /failed \(provider\/agent error\)/);
+    });
+
     // ── In-progress activity snapshots ──
 
     it("keeps a long active tool call from surfacing false stalled status", async () => {

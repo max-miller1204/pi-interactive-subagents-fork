@@ -3484,6 +3484,26 @@ describe("subagent interruption", () => {
     assert.doesNotMatch(presentation, /Session id:/);
   });
 
+  it("reports a closed pane without calling it a provider error", () => {
+    const presentation = (subagentsModule as any).__test__.resolveResultPresentation(
+      {
+        reason: "missing-pane",
+        exitCode: 1,
+        elapsed: 2,
+        summary: "Partial child output",
+        sessionFile: "/tmp/subagent.jsonl",
+        errorMessage: "Subagent pane %42 no longer exists.",
+      },
+      "Worker",
+    );
+
+    assert.match(presentation, /Sub-agent "Worker" failed/);
+    assert.match(presentation, /pane was closed/);
+    assert.match(presentation, /Subagent pane %42 no longer exists/);
+    assert.doesNotMatch(presentation, /provider\/agent error/);
+    assert.doesNotMatch(presentation, /Partial child output/);
+  });
+
   it("renders a clear provider/agent error when errorMessage is set", () => {
     // Previously, an overload retry-exhaustion produced exitCode 0 with a
     // stale summary — the orchestrator thought the subagent finished
@@ -3509,6 +3529,31 @@ describe("subagent interruption", () => {
     assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
     assert.doesNotMatch(presentation, /Session id:/);
     assert.doesNotMatch(presentation, /ignored when errorMessage is present/);
+  });
+});
+
+describe("subagent result renderer", () => {
+  it("labels a missing pane as a pane failure", () => {
+    const { api, registeredMessageRenderers } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const entry = registeredMessageRenderers.find((item) => item.name === "subagent_result");
+    assert.ok(entry);
+    const theme = {
+      fg(_color: string, text: string) { return text; },
+      bg(_color: string, text: string) { return text; },
+      bold(text: string) { return text; },
+    };
+    const rendered = entry.renderer({
+      customType: "subagent_result",
+      content: 'Sub-agent "Alpha" failed after 14s (pane was closed).\n\nError: Subagent pane %42 no longer exists.',
+      details: {
+        name: "Alpha", exitCode: 1, elapsed: 14,
+        reason: "missing-pane", errorMessage: "Subagent pane %42 no longer exists.",
+      },
+    }, { expanded: true }, theme).render(90).join("\n");
+
+    assert.match(rendered, /failed \(pane closed\)/);
+    assert.doesNotMatch(rendered, /failed \(provider\/agent error\)/);
   });
 });
 

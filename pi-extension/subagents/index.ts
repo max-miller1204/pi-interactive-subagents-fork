@@ -22,8 +22,10 @@ import {
   sendLongCommand,
   pollForExit,
   closeSurface,
+  rebalanceSurfaces,
   shellEscape,
   readScreen,
+  type PollResult,
 } from "./tmux.ts";
 
 import {
@@ -860,7 +862,7 @@ function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
 function resolveResultPresentation(
   result: Pick<
     SubagentResult,
-    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage"
+    "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage" | "reason"
   >,
   name: string,
 ): string {
@@ -873,9 +875,12 @@ function resolveResultPresentation(
     // produce a usable result — surface the underlying provider/network
     // failure so the orchestrator can decide whether to retry, resume, or
     // change approach instead of silently treating the run as completed.
+    const cause = result.reason === "missing-pane"
+      ? "pane was closed"
+      : "provider/agent error — auto-retry exhausted";
     return (
       `Sub-agent "${name}" failed after ${formatElapsed(result.elapsed)} ` +
-      `(provider/agent error — auto-retry exhausted).\n\n` +
+      `(${cause}).\n\n` +
       `Error: ${result.errorMessage}\n\n` +
       `The subagent did not produce a result. You can retry by spawning a new ` +
       `subagent or resume the session with subagent_message.${sessionRef}`
@@ -900,7 +905,8 @@ interface SubagentResult {
   exitCode: number;
   elapsed: number;
   error?: string;
-  /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
+  reason?: PollResult["reason"];
+  /** Failure message for provider errors or a closed pane. */
   errorMessage?: string;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
@@ -1915,7 +1921,11 @@ async function watchSubagent(
     const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
     const subagentSessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
 
-    closeSurface(surface);
+    if (result.reason === "missing-pane") {
+      rebalanceSurfaces();
+    } else {
+      closeSurface(surface);
+    }
     runningSubagents.delete(running.id);
 
     return {
@@ -1926,6 +1936,7 @@ async function watchSubagent(
       ...(subagentSessionId ? { sessionId: subagentSessionId } : {}),
       exitCode: result.exitCode,
       elapsed,
+      reason: result.reason,
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       ...(stats ? { stats } : {}),
     };
@@ -2266,6 +2277,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   thinking: running.thinking,
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
+                  reason: result.reason,
                   sessionFile: result.sessionFile,
                   ...(result.sessionId ? { sessionId: result.sessionId } : {}),
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
@@ -2701,6 +2713,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   task: message,
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
+                  reason: result.reason,
                   sessionFile: sessionPath,
                   sessionId: resumedSessionId,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
@@ -2793,7 +2806,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // like the in-process extension. Failure: surface the failure reason.
         let header: string;
         if (failed) {
-          const reason = errorMessage ? "failed (provider/agent error)" : `failed (exit ${exitCode})`;
+          const reason = details.reason === "missing-pane"
+            ? "failed (pane closed)"
+            : errorMessage ? "failed (provider/agent error)" : `failed (exit ${exitCode})`;
           header = `${titleSegment}${theme.fg("error", reason)} ${theme.fg("dim", `· ${elapsed}`)}`;
         } else {
           const toolPart = stats ? `${stats.toolCount} tools · ${elapsed}` : elapsed;
