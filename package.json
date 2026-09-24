@@ -15,7 +15,7 @@
   "scripts": {
     "check:pi-versions": "node scripts/check-pi-versions.mjs",
     "test": "npm run check:pi-versions && node scripts/run-tests.mjs --test test/test.ts test/profiles.test.ts",
-    "test:integration": "npm run check:pi-versions && node scripts/run-tests.mjs --test --test-concurrency=1 test/integration/*.test.ts"
+    "test:integration": "npm run check:pi-versions && node scripts/run-tests.mjs --isolated-tmux --test --test-concurrency=1 test/integration/*.test.ts"
   },
   "pi": {
     "extensions": [
