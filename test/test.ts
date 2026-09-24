@@ -3532,6 +3532,31 @@ describe("subagent interruption", () => {
   });
 });
 
+describe("subagent result renderer", () => {
+  it("labels a missing pane as a pane failure", () => {
+    const { api, registeredMessageRenderers } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const entry = registeredMessageRenderers.find((item) => item.name === "subagent_result");
+    assert.ok(entry);
+    const theme = {
+      fg(_color: string, text: string) { return text; },
+      bg(_color: string, text: string) { return text; },
+      bold(text: string) { return text; },
+    };
+    const rendered = entry.renderer({
+      customType: "subagent_result",
+      content: 'Sub-agent "Alpha" failed after 14s (pane was closed).\n\nError: Subagent pane %42 no longer exists.',
+      details: {
+        name: "Alpha", exitCode: 1, elapsed: 14,
+        reason: "missing-pane", errorMessage: "Subagent pane %42 no longer exists.",
+      },
+    }, { expanded: true }, theme).render(90).join("\n");
+
+    assert.match(rendered, /failed \(pane closed\)/);
+    assert.doesNotMatch(rendered, /failed \(provider\/agent error\)/);
+  });
+});
+
 describe("subagent status renderer", () => {
   function createTheme() {
     return {

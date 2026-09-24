@@ -111,9 +111,9 @@ let rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
  * of parallel spawns or staggered exits collapses into a single layout call,
  * and non-fatal: a cosmetic resize must never break spawning or watching.
  */
-function rebalanceSurfaces(hintPane?: string): void {
-  // Prefer the parent pi pane (stable; survives a closing subagent pane).
-  const target = process.env.TMUX_PANE ?? hintPane;
+export function rebalanceSurfaces(hintPane?: string): void {
+  // Use an explicit live pane for its window. Otherwise use the parent pane.
+  const target = hintPane ?? process.env.TMUX_PANE;
   if (!target) return;
   if (rebalanceTimer) clearTimeout(rebalanceTimer);
   rebalanceTimer = setTimeout(() => {

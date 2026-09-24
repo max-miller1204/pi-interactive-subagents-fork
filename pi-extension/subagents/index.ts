@@ -22,6 +22,7 @@ import {
   sendLongCommand,
   pollForExit,
   closeSurface,
+  rebalanceSurfaces,
   shellEscape,
   readScreen,
   type PollResult,
@@ -1920,7 +1921,11 @@ async function watchSubagent(
     const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
     const subagentSessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
 
-    if (result.reason !== "missing-pane") closeSurface(surface);
+    if (result.reason === "missing-pane") {
+      rebalanceSurfaces();
+    } else {
+      closeSurface(surface);
+    }
     runningSubagents.delete(running.id);
 
     return {
@@ -2272,6 +2277,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   thinking: running.thinking,
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
+                  reason: result.reason,
                   sessionFile: result.sessionFile,
                   ...(result.sessionId ? { sessionId: result.sessionId } : {}),
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
@@ -2707,6 +2713,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   task: message,
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
+                  reason: result.reason,
                   sessionFile: sessionPath,
                   sessionId: resumedSessionId,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
@@ -2799,7 +2806,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // like the in-process extension. Failure: surface the failure reason.
         let header: string;
         if (failed) {
-          const reason = errorMessage ? "failed (provider/agent error)" : `failed (exit ${exitCode})`;
+          const reason = details.reason === "missing-pane"
+            ? "failed (pane closed)"
+            : errorMessage ? "failed (provider/agent error)" : `failed (exit ${exitCode})`;
           header = `${titleSegment}${theme.fg("error", reason)} ${theme.fg("dim", `· ${elapsed}`)}`;
         } else {
           const toolPart = stats ? `${stats.toolCount} tools · ${elapsed}` : elapsed;
