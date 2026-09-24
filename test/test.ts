@@ -1820,27 +1820,6 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("pins the active parent model when no override is configured", () => {
-    assert.equal(
-      testApi.resolveLaunchModel(undefined, undefined, {
-        provider: "openrouter",
-        id: "anthropic/claude-sonnet-4",
-      }),
-      "openrouter/anthropic/claude-sonnet-4",
-    );
-    assert.equal(
-      testApi.resolveLaunchModel("openai/gpt-5", "anthropic/agent-default", {
-        provider: "openrouter",
-        id: "fallback",
-      }),
-      "openai/gpt-5",
-    );
-    assert.throws(
-      () => testApi.resolveLaunchModel(undefined, undefined, undefined),
-      /without an active parent model/,
-    );
-  });
-
   it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {
     withTempDir((d) => {
       const parts: string[] = [];
@@ -2820,7 +2799,7 @@ describe("tool registration", () => {
     assert.match(result.content[0].text, /not a known agent/i);
   });
 
-  it("exposes a debloated schema: agent+task required, name/model/cwd optional, no override knobs", () => {
+  it("requires a profile instead of a model override", () => {
     const { api, registeredTools } = createMockExtensionApi();
     (subagentsModule as any).default(api);
 
@@ -2830,13 +2809,13 @@ describe("tool registration", () => {
     const props = subagentTool.parameters.properties;
     assert.deepEqual(
       Object.keys(props).sort(),
-      ["agent", "cwd", "model", "name", "task"],
-      "only agent/task/name/model/cwd should remain",
+      ["agent", "cwd", "name", "profile", "task"],
+      "only agent/task/profile/name/cwd should remain",
     );
     assert.deepEqual(
       [...(subagentTool.parameters.required ?? [])].sort(),
-      ["agent", "task"],
-      "agent and task must be required",
+      ["agent", "profile", "task"],
+      "agent, task, and profile must be required",
     );
     // `name` is now optional and purely cosmetic.
     assert.match(props.name.description, /cosmetic/i);
@@ -2844,6 +2823,26 @@ describe("tool registration", () => {
     for (const gone of ["tools", "skills", "systemPrompt", "fork", "interactive", "resumeSessionId"]) {
       assert.equal(props[gone], undefined, `expected ${gone} param to be removed`);
     }
+  });
+
+  it("prepares independent profile choices and rejects unsupported thinking", () => {
+    const policy = {
+      source: "/project/.pi/subagent-profiles.json",
+      profiles: {
+        quick: { model: "test/plain", thinking: "off", guidance: "Simple tasks" },
+        deep: { model: "test/deep", thinking: "high", guidance: "Complex tasks" },
+      },
+    };
+    const registry = {
+      find(provider: string, id: string) {
+        if (provider !== "test") return undefined;
+        return { provider, id, reasoning: id === "deep" };
+      },
+    };
+    const testApi = (subagentsModule as any).__test__;
+    const choices = ["quick", "deep"].map((name) => testApi.prepareProfileSpawn(policy, name, registry));
+    assert.deepEqual(choices.map((choice: any) => [choice.model.id, choice.thinking]), [["plain", "off"], ["deep", "high"]]);
+    assert.throws(() => testApi.prepareProfileSpawn({ ...policy, profiles: { bad: { ...policy.profiles.quick, thinking: "high" } } }, "bad", registry), /supports off/);
   });
 
   it("renders partial subagent tool-call args without throwing", () => {

@@ -55,6 +55,14 @@ import {
   loadStatusConfig,
 } from "./status.ts";
 import {
+  describeProfiles,
+  loadProfilePolicy,
+  resolveProfile,
+  type ProfilePolicy,
+  type ModelRegistry,
+  type ResolvedProfile,
+} from "./profiles.ts";
+import {
   getSubagentActivityFile,
   readSubagentActivityFile,
   type ActivityReadResult,
@@ -105,7 +113,7 @@ const SubagentParams = Type.Object({
         "Has no effect on which agent runs — use `agent` for that.",
     }),
   ),
-  model: Type.Optional(Type.String({ description: "Model override (overrides agent default)" })),
+  profile: Type.String({ description: "Approved model and thinking profile for this task" }),
   cwd: Type.Optional(
     Type.String({
       description:
@@ -373,27 +381,6 @@ function resolveModelProviderExtension(model: PiModel): string | null {
     );
   }
   return extensionPath;
-}
-
-function resolveRuntimeModel(
-  modelReference: string | undefined,
-  modelRegistry: { find(provider: string, modelId: string): PiModel | undefined; getAll(): PiModel[] },
-): PiModel {
-  if (!modelReference) throw new Error("Cannot resolve an empty Pi model reference");
-  const separator = modelReference.indexOf("/");
-  if (separator > 0) {
-    const model = modelRegistry.find(
-      modelReference.slice(0, separator),
-      modelReference.slice(separator + 1),
-    );
-    if (model) return model;
-  } else {
-    const matches = modelRegistry.getAll().filter((model) => model.id === modelReference);
-    if (matches.length === 1) return matches[0];
-  }
-  throw new Error(
-    `Cannot safely resolve exact Pi model metadata for "${modelReference}"; use provider/model-id`,
-  );
 }
 
 /**
@@ -693,20 +680,8 @@ function resolveEffectiveSessionMode(
   return agentDefs?.sessionMode ?? "standalone";
 }
 
-function resolveLaunchModel(
-  requestedModel: string | undefined,
-  agentModel: string | undefined,
-  activeModel: { provider: string; id: string } | undefined,
-): string {
-  const configuredModel = requestedModel ?? agentModel;
-  if (configuredModel !== undefined) {
-    if (configuredModel.trim().length === 0) throw new Error("Subagent model must not be empty");
-    return configuredModel;
-  }
-  if (!activeModel || !activeModel.provider.trim() || !activeModel.id.trim()) {
-    throw new Error("Cannot launch subagent without an active parent model");
-  }
-  return `${activeModel.provider}/${activeModel.id}`;
+function prepareProfileSpawn(policy: ProfilePolicy, name: string, registry: ModelRegistry): ResolvedProfile {
+  return resolveProfile(policy, name, registry);
 }
 
 function resolveLaunchBehavior(
@@ -938,6 +913,9 @@ interface RunningSubagent {
   id: string;
   name: string;
   task: string;
+  profile: string;
+  model: string;
+  thinking: string;
   agent?: string;
   surface: string;
   startTime: number;
@@ -1554,9 +1532,8 @@ export const __test__ = {
   discoverAgentDefinitions,
   getAgentConfigDir,
   resolveEffectiveSessionMode,
-  resolveLaunchModel,
+  prepareProfileSpawn,
   resolveModelProviderExtension,
-  resolveRuntimeModel,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
@@ -1610,6 +1587,7 @@ async function launchSubagent(
       getAll(): PiModel[];
     };
   },
+  policy: ProfilePolicy,
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
@@ -1617,8 +1595,9 @@ async function launchSubagent(
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
   if (agentDefs) requirePiAgent(agentDefs);
-  const effectiveModel = resolveLaunchModel(params.model, agentDefs?.model, ctx.model);
-  const runtimeModel = resolveRuntimeModel(effectiveModel, ctx.modelRegistry);
+  const choice = prepareProfileSpawn(policy, params.profile, ctx.modelRegistry);
+  const runtimeModel = choice.model;
+  const effectiveThinking = choice.thinking;
   const modelProviderExtension = resolveModelProviderExtension(runtimeModel);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
@@ -1627,7 +1606,6 @@ async function launchSubagent(
     effectiveSkills,
     agentDefs?.availableSkills,
   );
-  const effectiveThinking = agentDefs?.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
   const defaultTools = effectiveTools === undefined ? latestPi?.getActiveTools() : undefined;
@@ -1831,6 +1809,9 @@ async function launchSubagent(
     name: params.name,
     task: params.task,
     agent: params.agent,
+    profile: choice.name,
+    model: `${runtimeModel.provider}/${runtimeModel.id}`,
+    thinking: effectiveThinking,
     surface,
     startTime,
     sessionFile: subagentSessionFile,
@@ -2025,6 +2006,18 @@ function reconcileCompatibilityRegistry(
 
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
+  let policy: ProfilePolicy | undefined;
+  let policyError: Error | undefined;
+  try {
+    policy = loadProfilePolicy(process.cwd(), getAgentConfigDir());
+  } catch (error) {
+    policyError = error as Error;
+  }
+  function requirePolicy(): ProfilePolicy {
+    if (policyError) throw policyError;
+    if (!policy) throw new Error("Subagent profile policy was not loaded");
+    return policy;
+  }
   // Capture the UI context for widget updates
   pi.on("session_start", (event, ctx) => {
     const lifecycleErrors: string[] = [];
@@ -2213,7 +2206,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // from then on uniqueRunningName tracks it via the running map.
         let running;
         try {
-          running = await launchSubagent(params, ctx);
+          running = await launchSubagent(params, ctx, requirePolicy());
         } finally {
           if (reservedName) reservedNames.delete(reservedName);
         }
@@ -2249,6 +2242,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   name: running.name,
                   task: running.task,
                   agent: running.agent,
+                  profile: running.profile,
+                  model: running.model,
+                  thinking: running.thinking,
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
                   sessionFile: result.sessionFile,
@@ -2279,7 +2275,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                `Sub-agent "${params.name}" launched and is now running in the background. ` +
+                `Sub-agent "${params.name}" launched with profile "${running.profile}" (${running.model}, ${running.thinking}) and is now running in the background. ` +
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
                 `Until then, move on to other work or tell the user you're waiting.`,
@@ -2290,6 +2286,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             name: params.name,
             task: params.task,
             agent: params.agent,
+            profile: running.profile,
+            model: running.model,
+            thinking: running.thinking,
             sessionFile: running.sessionFile,
             launchScriptFile: running.launchScriptFile,
             status: "started",

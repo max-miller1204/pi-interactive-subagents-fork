@@ -12,13 +12,15 @@
  *   tmux new 'npm run test:integration'
  *
  * Configuration:
- *   PI_TEST_MODEL     — optional model override; the Pi default is used when omitted
+ *   PI_TEST_MODEL     - required model for profile-backed integration tests
  *   PI_TEST_TIMEOUT   — per-test timeout in ms (default: 120000)
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readNameRegistry, readSubagentLoadout } from "../../pi-extension/subagents/session.ts";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -27,11 +29,13 @@ import {
   startPi,
   waitForScreen,
   waitForFile,
+  sendCommand,
   sleep,
   uniqueId,
   trackTempFile,
   readScreen,
   PI_TIMEOUT,
+  TEST_MODEL,
   type TestEnv,
 } from "./harness.ts";
 
@@ -42,12 +46,21 @@ if (backends.length === 0) {
   console.log("   Run inside tmux to enable these tests.");
 }
 
-for (const backend of backends) {
+if (!TEST_MODEL) console.log("PI_TEST_MODEL is required; skipping model-backed lifecycle tests.");
+
+for (const backend of TEST_MODEL ? backends : []) {
   describe(`subagent-lifecycle [${backend}]`, { timeout: PI_TIMEOUT * 3 }, () => {
     let env: TestEnv;
 
     beforeEach(() => {
       env = createTestEnv();
+      execFileSync("git", ["init", "-q", env.dir]);
+      writeFileSync(join(env.dir, ".pi", "subagent-profiles.json"), JSON.stringify({
+        profiles: {
+          quick: { model: TEST_MODEL, thinking: "off", guidance: "Focused tasks" },
+          deep: { model: TEST_MODEL, thinking: "off", guidance: "Independent tasks" },
+        },
+      }));
     });
 
     afterEach(() => {
@@ -70,6 +83,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Echo-${id}"`,
         `  agent: "test-echo"`,
+        `  profile: "quick"`,
         `  task: "Run this bash command: echo 'PASS_${id}' > '${markerFile}'; printf '%s' \"$PI_SUBAGENT_ACTIVITY_FILE\" > '${activityPathFile}'"`,
         `Do not do anything else. Just call the subagent tool once.`,
         `After you receive the subagent result, say INTEGRATION_COMPLETE.`,
@@ -117,6 +131,10 @@ for (const backend of backends) {
       assert.equal(result.details.exitCode, 0, "Child must exit successfully");
       const sessionFile = result.details.sessionFile;
       assert.ok(existsSync(sessionFile), `Subagent session file should exist: ${sessionFile}`);
+      const loadout = readSubagentLoadout(sessionFile);
+      assert.equal(loadout?.model, TEST_MODEL);
+      assert.equal(loadout?.thinking, "off");
+      assert.equal(result.details.profile, "quick");
       const lines = readFileSync(sessionFile, "utf8").trim().split("\n");
       assert.ok(lines.length >= 2, `Session should have at least two entries, got ${lines.length}`);
       const header = JSON.parse(lines[0]);
@@ -141,6 +159,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Status-${id}"`,
         `  agent: "test-echo"`,
+        `  profile: "quick"`,
         `  task: "Run this bash command: echo 'START_${id}' > '${startFile}'; sleep 90; echo 'STATUS_${id}' > '${markerFile}'"`,
         `Do not do anything else. Just call the subagent tool once.`,
         `After you receive the subagent result, say STATUS_TEST_DONE.`,
@@ -176,8 +195,10 @@ for (const backend of backends) {
       const id = uniqueId();
       const fileA = `/tmp/pi-integ-para-${id}-a.txt`;
       const fileB = `/tmp/pi-integ-para-${id}-b.txt`;
+      const activityPathFile = `/tmp/pi-integ-para-${id}-activity.txt`;
       trackTempFile(env, fileA);
       trackTempFile(env, fileB);
+      trackTempFile(env, activityPathFile);
 
       const surface = createTrackedSurface(env, `parallel-${id}`);
       await sleep(1000);
@@ -188,11 +209,13 @@ for (const backend of backends) {
         `First call:`,
         `  name: "ParaA-${id}"`,
         `  agent: "test-echo"`,
-        `  task: "Run: echo 'DONE_A_${id}' > '${fileA}'"`,
+        `  profile: "quick"`,
+        `  task: "Run: echo 'DONE_A_${id}' > '${fileA}'; printf '%s' \"$PI_SUBAGENT_ACTIVITY_FILE\" > '${activityPathFile}'"`,
         ``,
         `Second call:`,
         `  name: "ParaB-${id}"`,
         `  agent: "test-echo"`,
+        `  profile: "deep"`,
         `  task: "Run: echo 'DONE_B_${id}' > '${fileB}'"`,
         ``,
         `Call both subagent tools NOW, do not wait between them.`,
@@ -208,6 +231,81 @@ for (const backend of backends) {
 
       assert.ok(contentA.includes(`DONE_A_${id}`), `File A should contain marker`);
       assert.ok(contentB.includes(`DONE_B_${id}`), `File B should contain marker`);
+      const activityFile = (await waitForFile(activityPathFile, PI_TIMEOUT)).trim();
+      const registry = readNameRegistry(dirname(dirname(activityFile)));
+      const first = readSubagentLoadout(registry[`ParaA-${id}`].sessionFile);
+      const second = readSubagentLoadout(registry[`ParaB-${id}`].sessionFile);
+      assert.equal(first?.model, TEST_MODEL);
+      assert.equal(second?.model, TEST_MODEL);
+      assert.equal(first?.thinking, "off");
+      assert.equal(second?.thinking, "off");
+      assert.notEqual(registry[`ParaA-${id}`].sessionFile, registry[`ParaB-${id}`].sessionFile);
+    });
+
+    it("uses the project policy for nested delegation", async () => {
+      const id = uniqueId();
+      const markerFile = `/tmp/pi-integ-nested-${id}.txt`;
+      trackTempFile(env, markerFile);
+      const surface = createTrackedSurface(env, `nested-${id}`);
+      const task = [
+        `Call subagent with agent: "test-nested", profile: "quick", name: "Nested-${id}".`,
+        `Give it this task: Call subagent with agent: "test-echo", profile: "deep", name: "Leaf-${id}",`,
+        `and task: "Run: echo 'NESTED_${id}' > '${markerFile}'". Wait for the result.`,
+        `Do not write the file yourself.`,
+      ].join(" ");
+      startPi(surface, env.dir, task);
+      assert.match(await waitForFile(markerFile, PI_TIMEOUT, /NESTED_/), new RegExp(`NESTED_${id}`));
+    });
+
+    it("keeps the parent policy when child cwd has another policy", async () => {
+      const id = uniqueId();
+      const markerFile = `/tmp/pi-integ-othercwd-${id}.txt`;
+      trackTempFile(env, markerFile);
+      const childRepo = join(env.dir, "other-repo");
+      mkdirSync(join(childRepo, ".pi"), { recursive: true });
+      execFileSync("git", ["init", "-q", childRepo]);
+      writeFileSync(join(childRepo, ".pi", "subagent-profiles.json"), JSON.stringify({
+        profiles: { wrong: { model: "not-available/model", thinking: "high", guidance: "Wrong repository" } },
+      }));
+      const surface = createTrackedSurface(env, `othercwd-${id}`);
+      startPi(surface, env.dir, [
+        `Call subagent with agent: "test-echo", profile: "quick", cwd: "${childRepo}".`,
+        `Task: Run bash: echo PARENT_POLICY > '${markerFile}'.`,
+        `Do not write the file yourself.`,
+      ].join(" "));
+      assert.match(await waitForFile(markerFile, PI_TIMEOUT, /PARENT_POLICY/), /PARENT_POLICY/);
+    });
+
+    it("resumes with its saved model after the project profile file is removed", async () => {
+      const id = uniqueId();
+      const firstFile = `/tmp/pi-integ-resume-${id}-first.txt`;
+      const secondFile = `/tmp/pi-integ-resume-${id}-second.txt`;
+      const activityPathFile = `/tmp/pi-integ-resume-${id}-activity.txt`;
+      for (const file of [firstFile, secondFile, activityPathFile]) trackTempFile(env, file);
+      const surface = createTrackedSurface(env, `resume-${id}`);
+      const name = `Resume-${id}`;
+      startPi(surface, env.dir, [
+        `Call subagent with agent: "test-echo", profile: "quick", name: "${name}".`,
+        `Task: Run bash: echo FIRST > '${firstFile}'; printf '%s' "$PI_SUBAGENT_ACTIVITY_FILE" > '${activityPathFile}'.`,
+        `After the child result arrives, say READY_TO_RESUME and wait for instructions.`,
+      ].join(" "));
+      await waitForFile(firstFile, PI_TIMEOUT, /FIRST/);
+      const activityFile = (await waitForFile(activityPathFile, PI_TIMEOUT)).trim();
+      const parentId = basename(dirname(dirname(activityFile)));
+      const sessionDir = dirname(dirname(dirname(dirname(activityFile))));
+      const parentSession = readdirSync(sessionDir)
+        .filter((file) => file.endsWith(".jsonl"))
+        .map((file) => join(sessionDir, file))
+        .find((file) => JSON.parse(readFileSync(file, "utf8").split("\n")[0]).id === parentId);
+      assert.ok(parentSession);
+      await waitForFile(parentSession, PI_TIMEOUT, /"customType":"subagent_result"/);
+      const childFile = readNameRegistry(dirname(dirname(activityFile)))[name].sessionFile;
+      assert.equal(readSubagentLoadout(childFile)?.model, TEST_MODEL);
+      unlinkSync(join(env.dir, ".pi", "subagent-profiles.json"));
+      sendCommand(surface, `Call subagent_message with name: "${name}", message: "Run bash: echo SECOND > '${secondFile}'". Do not spawn a new agent.`);
+      await waitForFile(secondFile, PI_TIMEOUT, /SECOND/);
+      assert.equal(readSubagentLoadout(childFile)?.model, TEST_MODEL);
+      assert.equal(readSubagentLoadout(childFile)?.thinking, "off");
     });
 
     // ── Fork mode ──
@@ -224,6 +322,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Fork-${id}"`,
         `  agent: "test-fork"`,
+        `  profile: "quick"`,
         `  task: "Run this bash command: echo \"$PI_SUBAGENT_SESSION\" > '${markerFile}'"`,
         `Do not set a fork parameter. The test-fork agent profile enables fork mode.`,
         `After you receive the result, say FORK_COMPLETE.`,
@@ -288,6 +387,7 @@ for (const backend of backends) {
         `Call the subagent tool with these EXACT parameters:`,
         `  name: "Ping-${id}"`,
         `  agent: "test-ping"`,
+        `  profile: "quick"`,
         `  task: "PING_TEST_${id}"`,
         `Just call the subagent tool once. Do not do anything else before calling it.`,
       ].join("\n");
@@ -325,6 +425,7 @@ for (const backend of backends) {
         `Then call the subagent tool:`,
         `  name: "Disco-${id}"`,
         `  agent: "test-echo"`,
+        `  profile: "quick"`,
         `  task: "Run: echo 'DISCO_${id}' > '${markerFile}'"`,
         `After you receive the subagent result, say DISCOVERY_DONE.`,
       ].join("\n");
@@ -350,7 +451,7 @@ for (const backend of backends) {
         `Call the subagent tool with these parameters:`,
         `  name: "SysP-${id}"`,
         `  agent: "test-echo"`,
-        `  systemPrompt: "Always start your response with CUSTOM_PROMPT_ACTIVE."`,
+        `  profile: "quick"`,
         `  task: "Write 'SYSPROMPT_${id}' to ${markerFile} using bash: echo 'SYSPROMPT_${id}' > '${markerFile}'"`,
         `After the subagent completes, say SYSPROMPT_TEST_DONE.`,
       ].join("\n");
