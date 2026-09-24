@@ -103,7 +103,7 @@ const SubagentParams = Type.Object({
   agent: Type.String({
     description:
       "Which agent to spawn (e.g. 'worker', 'scout', 'researcher'). This loads the agent's " +
-      "fixed profile — its model, tool loadout, and system prompt. Must be one of the available agents.",
+      "role, tool loadout, and system prompt. Must be one of the available agents.",
   }),
   task: Type.String({ description: "Task/prompt for the sub-agent" }),
   name: Type.Optional(
@@ -2018,6 +2018,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     if (!policy) throw new Error("Subagent profile policy was not loaded");
     return policy;
   }
+  const profileText = policyError
+    ? `Profile policy error: ${policyError.message}`
+    : describeProfiles(requirePolicy());
+  const profileGuidance = `Active profiles (select one per spawn):\n${profileText}`;
   // Capture the UI context for widget updates
   pi.on("session_start", (event, ctx) => {
     const lifecycleErrors: string[] = [];
@@ -2095,14 +2099,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.\n" + profileGuidance,
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.\n" + profileGuidance,
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -2364,49 +2368,36 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       description:
         "List all available subagent definitions. " +
         "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "Project-local agents override global ones with the same name.\n" + profileGuidance,
       promptSnippet:
         "List all available subagent definitions. " +
         "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "Project-local agents override global ones with the same name.\n" + profileGuidance,
       parameters: Type.Object({}),
 
       async execute() {
+        const selectedPolicy = requirePolicy();
         const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
-
-        if (list.length === 0) {
-          return {
-            content: [{ type: "text", text: "No subagent definitions found." }],
-            details: { agents: [] },
-          };
-        }
-
         const lines = list.map((a) => {
           const badge = a.source === "project" ? " (project)" : "";
-          const desc = a.description ? ` — ${a.description}` : "";
-          const model = a.model ? ` [${a.model}]` : "";
-          return `• ${a.name}${badge}${model}${desc}`;
+          const desc = a.description ? `: ${a.description}` : "";
+          return `• ${a.name}${badge}${desc}`;
         });
-
         return {
-          content: [{ type: "text", text: lines.join("\n") }],
-          details: { agents: list },
+          content: [{ type: "text", text: `${lines.join("\n") || "No subagent definitions found."}\n${profileGuidance}` }],
+          details: { agents: list, profiles: selectedPolicy.profiles },
         };
       },
 
       renderResult(result, _opts, theme) {
         const details = result.details as any;
         const agents = details?.agents ?? [];
-        if (agents.length === 0) {
-          return new Text(theme.fg("dim", "No subagent definitions found."), 0, 0);
-        }
         const lines = agents.map((a: any) => {
           const badge = a.source === "project" ? theme.fg("accent", " (project)") : "";
-          const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
-          const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
-          return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
+          const desc = a.description ? theme.fg("dim", `: ${a.description}`) : "";
+          return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${desc}`;
         });
-        return new Text(lines.join("\n"), 0, 0);
+        return new Text(`${lines.join("\n") || "No subagent definitions found."}\n${profileGuidance}`, 0, 0);
       },
     });
 
@@ -2752,7 +2743,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       const taskText = task || `You are the ${agentName} agent. Wait for instructions.`;
       const displayName = agentName[0].toUpperCase() + agentName.slice(1);
-      const toolCall = `Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`;
+      const toolCall = `Select an active profile for this task. Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}, and that profile.`;
       pi.sendUserMessage(toolCall);
     },
   });

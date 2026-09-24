@@ -1,5 +1,6 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -179,6 +180,9 @@ async function withIsolatedAgentEnv(
 
   mkdirSync(projectAgentsDir, { recursive: true });
   mkdirSync(globalAgentsDir, { recursive: true });
+  writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+    profiles: { quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" } },
+  }));
   process.chdir(projectDir);
   process.env.PI_CODING_AGENT_DIR = globalDir;
 
@@ -2147,6 +2151,65 @@ describe("subagent discovery", () => {
       testApi.buildPiPromptArgs({ effectiveSkills: "review", taskDelivery: "direct", taskArg: "do the task" }),
       ["/skill:review", "do the task"],
     );
+  });
+
+  it("shows the selected project profiles in the tool and list result", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { global: { model: "test/global", thinking: "off", guidance: "Global work" } },
+      }));
+      writeFileSync(join(projectDir, ".pi", "subagent-profiles.json"), JSON.stringify({
+        profiles: {
+          quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" },
+          deep: { model: "test/deep", thinking: "high", guidance: "Complex tasks" },
+        },
+      }));
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const spawn = registeredTools.find((tool) => tool.name === "subagent");
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      assert.match(spawn.description, /quick: Focused tasks/);
+      assert.match(spawn.promptSnippet, /deep: Complex tasks/);
+      assert.doesNotMatch(spawn.description, /global: Global work/);
+      const result = await list.execute();
+      assert.deepEqual(Object.keys(result.details.profiles), ["quick", "deep"]);
+      assert.match(result.content[0].text, /quick: Focused tasks/);
+    });
+  });
+
+  it("reports a broken project policy without using global choices", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { global: { model: "test/global", thinking: "off", guidance: "Global work" } },
+      }));
+      writeFileSync(join(projectDir, ".pi", "subagent-profiles.json"), "{bad json");
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const spawn = registeredTools.find((tool) => tool.name === "subagent");
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      assert.match(spawn.description, /Profile policy error.*subagent-profiles\.json/i);
+      assert.doesNotMatch(spawn.description, /global: Global work/);
+      await assert.rejects(() => list.execute(), /Invalid JSON.*subagent-profiles\.json/);
+    });
+  });
+
+  it("lists profiles even when no agent definitions are visible", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir, projectAgentsDir }) => {
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" } },
+      }));
+      for (const name of ["scout", "worker", "researcher"]) {
+        writeAgentFile(projectAgentsDir, name, `name: ${name}\ndisable-model-invocation: true`);
+      }
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      const result = await list.execute();
+      assert.deepEqual(result.details.profiles.quick.thinking, "off");
+      assert.match(result.content[0].text, /quick: Focused tasks/);
+    });
   });
 
   it("lists visible agents from discovery", async () => {

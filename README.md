@@ -35,8 +35,8 @@ There is also a `/subagent <agent> <task>` command for spawning directly.
 ### Spawning
 
 ```typescript
-subagent({ agent: "scout", task: "Analyze the auth module" });
-subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode toggle" });
+subagent({ agent: "scout", profile: "quick", task: "Analyze the auth module" });
+subagent({ agent: "worker", profile: "deep", name: "dark-mode", task: "Implement the dark mode toggle" });
 ```
 
 | Parameter | Type | Default | Description |
@@ -44,8 +44,35 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `agent` | string | required | Which agent to spawn (must be known and permitted) |
 | `task` | string | required | Task prompt |
 | `name` | string | agent name | Display name for the pane and widget. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
-| `model` | string | agent's model | Override the model for this spawn |
+| `profile` | string | required | Approved model and thinking choice for this task |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
+
+### Model and thinking profiles
+
+Create `~/.pi/agent/subagent-profiles.json` to share approved choices across repositories. If you set `PI_CODING_AGENT_DIR`, put the file in that directory instead. Copy `subagent-profiles.json.example` as a starting point, then replace its model IDs with models available in your Pi installation.
+
+A repository can put its own policy at `.pi/subagent-profiles.json`. The repository file replaces the complete global list. It does not merge with the global list. You can add the project file to `.gitignore` if you want to keep the policy local. Each person must then create their own copy. A child `cwd` override does not change which policy the parent uses for that spawn. Outside a Git repository, only the global file applies.
+
+```json
+{
+  "profiles": {
+    "quick": {
+      "model": "provider/fast-model",
+      "thinking": "low",
+      "guidance": "Use for focused, routine tasks."
+    },
+    "deep": {
+      "model": "provider/strong-model",
+      "thinking": "high",
+      "guidance": "Use for complex tasks."
+    }
+  }
+}
+```
+
+The parent agent selects one profile on every spawn. The `subagent` tool and `subagents_list` show the active names and guidance. Pi checks whether each profile's model is available and whether that model supports the requested thinking level. Supported levels depend on the model and may include `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Pi does not change an unsupported level to another level. A missing, invalid, or unknown policy stops a spawn before pane creation. Reload Pi to read policy file changes for new spawns.
+
+The selected model and thinking level are saved in the child's loadout snapshot. Resume uses those saved values even if the policy file changes or is removed. Agent roles control tools and instructions. They do not select a model or thinking level. Direct `model` overrides are not supported.
 
 ### Messaging
 
@@ -57,8 +84,6 @@ subagent_message({ name: "scout", message: "Also check the auth middleware" });
 
 - **Running** — the message is typed into the live pane (newlines flattened) and picked up at the next turn boundary. The call returns immediately; the eventual completion still arrives as a steer message.
 - **Finished Pi session** — the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
-- **Claude CLI agent** — messageable while its pane is running, but not resumable after completion because it has no Pi session file.
-
 Every Pi-backed spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name is not registered, the session file is gone, the session predates extension-manifest snapshots, or a pinned extension or skill file is no longer installed.
 
 **Resume replays the original sandbox.** At spawn time the fully resolved loadout — tool allowlist, exact tool/provider/control extension entry paths, skill policy and pinned skill files, model identity, thinking level, system prompt, spawn whitelist, cwd, and Pi config-directory path — is snapshotted to `<session>.loadout.json`. Resume replays those pinned entry paths without resolving strict skill or tool paths from the current parent. Extension discovery stays disabled. Normal skill discovery stays disabled for `none` and `allowlist`. Trusted pinned extensions can still contribute resources at runtime, as described in [Skill access control](#skill-access-control). Mutable request configuration read from the snapshotted agent directory, including `models.json`, authentication state, and provider/model headers, remains external to the sidecar and is not frozen across resume.
@@ -71,11 +96,11 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 
 ## Bundled agents
 
-| Agent | Model | Tools | Role |
-| ----- | ----- | ----- | ---- |
-| **scout** | `openrouter/z-ai/glm-5.3` | `read`, `grep`, `find`, `ls` | Fast read-only codebase recon |
-| **researcher** | `openrouter/z-ai/glm-5.3` | `web_search`, `web_fetch`, `safe_bash` | Web research, synthesized into a sourced brief |
-| **worker** | `openrouter/z-ai/glm-5.3` | `read`, `write`, `edit`, `bash`, `web_search`, `web_fetch` + spawning | General implementer; may spawn `scout` and `researcher` |
+| Agent | Tools | Role |
+| ----- | ----- | ---- |
+| **scout** | `read`, `grep`, `find`, `ls` | Read-only codebase investigation |
+| **researcher** | `web_search`, `web_fetch`, `safe_bash` | Web research with sources |
+| **worker** | `read`, `write`, `edit`, `bash`, `web_search`, `web_fetch` + spawning | General implementer; may spawn `scout` and `researcher` |
 
 All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
 
@@ -87,8 +112,6 @@ Place a `.md` file in `.pi/agents/` (project) or `~/.pi/agent/agents/` (global).
 ---
 name: my-agent
 description: Does something specific
-model: openrouter/z-ai/glm-5.3
-thinking: medium
 tools: read, edit, write, safe_bash, web_search
 skill-policy: allowlist
 available-skills: issue-triage, reviewed-pr
@@ -106,8 +129,6 @@ You are a specialized agent that does X...
 | ----- | ---- | ----------- |
 | `name` | string | Agent name (used in `agent: "my-agent"`) |
 | `description` | string | Shown in `subagents_list` |
-| `model` | string | Default model |
-| `thinking` | string | `minimal`, `low`, `medium`, or `high` |
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Any extension tool loaded in the parent can be used when Pi reports a loadable `sourceInfo.path`; `safe_bash` is bundled. Only the extensions backing listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to load eagerly. With `allowlist`, each name must also be in `available-skills` |
@@ -119,7 +140,9 @@ You are a specialized agent that does X...
 | `interactive` | boolean | Whether stall/recovery transitions wake the parent (see below) |
 | `cwd` | string | Default working directory |
 | `disable-model-invocation` | boolean | Hide from `subagents_list`; still spawnable by explicit name |
-| `cli` | string | `claude` runs the agent via the Claude Code CLI instead of pi |
+| `cli` | string | `cli: claude` is not supported and stops a spawn. Omit this field for Pi agents |
+
+Agent files with `model` or `thinking` fields can still load, but profiles override those fields on every Pi spawn. Remove the fields from new agent definitions.
 
 ### session-mode
 
@@ -167,8 +190,6 @@ These policies control normal Pi skill discovery and the skill files that the la
 
 Extensions are executable trusted code. They can also alter prompts or register commands. Skill policy is not a sandbox against these extensions, or a file-system sandbox for agents that have file-reading tools. Only load extensions that you trust with the child's context and permissions.
 
-Strict skill policies apply only to Pi sub-agents. Claude CLI profiles that declare `skill-policy` or `available-skills` are rejected.
-
 ## Role folders
 
 `cwd` starts a sub-agent in a directory with its own config, so role-specific context applies. With the default `all` policy, role-specific skills are also discovered. With `allowlist`, a role-specific skill loaded explicitly by the launcher must already be present in the parent's command metadata so the launcher can pin its exact file. Trusted extensions can contribute other skills at runtime. Restricted agents still use `--no-extensions`; a role-specific extension tool must already be represented by parent provenance or the explicit compatibility registration hook:
@@ -181,7 +202,7 @@ project/
 ```
 
 ```typescript
-subagent({ agent: "worker", cwd: "agents/sre", task: "Review the deployment pipeline" });
+subagent({ agent: "worker", profile: "deep", cwd: "agents/sre", task: "Review the deployment pipeline" });
 ```
 
 Set a per-agent default with `cwd:` in frontmatter.
@@ -206,6 +227,8 @@ Status display is configured via `config.json` in the extension directory (copy 
 ```bash
 tmux new -A -s pi 'pi'
 ```
+
+Integration tests use the global `pi` executable on `PATH`, not the repository's local Pi dependency. Set `PI_TEST_MODEL` to an authenticated `provider/model-id` to run model-backed lifecycle tests. Without it, those tests are skipped.
 
 ## Acknowledgements
 
