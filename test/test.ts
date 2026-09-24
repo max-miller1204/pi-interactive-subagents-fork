@@ -1,5 +1,6 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -179,6 +180,9 @@ async function withIsolatedAgentEnv(
 
   mkdirSync(projectAgentsDir, { recursive: true });
   mkdirSync(globalAgentsDir, { recursive: true });
+  writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+    profiles: { quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" } },
+  }));
   process.chdir(projectDir);
   process.env.PI_CODING_AGENT_DIR = globalDir;
 
@@ -905,12 +909,10 @@ describe("status.ts", () => {
     assert.equal(snapshot.waitingDurationText, "3m");
   });
 
-  it("uses elapsed-only fallback for claude-backed subagents", () => {
-    const state = createStatusState({ source: "claude", startTimeMs: 0 });
-    const snapshot = classifyStatus(state, 125_000);
-
-    assert.equal(snapshot.kind, "running");
-    assert.equal(snapshot.elapsedText, "2m");
+  it("starts Pi subagents in the starting state", () => {
+    const state = createStatusState({ source: "pi", startTimeMs: 0 });
+    assert.equal(state.source, "pi");
+    assert.equal(classifyStatus(state, 0).kind, "starting");
   });
 
   it("detects stalled transitions and recovery", () => {
@@ -1296,6 +1298,11 @@ describe("subagent discovery", () => {
         `${name} should resolve as non-interactive (autonomous, auto-exit)`,
       );
     }
+  });
+
+  it("rejects a Claude CLI agent before launch", () => {
+    assert.throws(() => testApi.requirePiAgent({ cli: "claude" }), /cli: claude is not supported/);
+    assert.doesNotThrow(() => testApi.requirePiAgent({ cli: undefined }));
   });
 
   it("worker is granted the spawning toolset restricted to scout and researcher", () => {
@@ -1817,43 +1824,6 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("pins the active parent model when no override is configured", () => {
-    assert.equal(
-      testApi.resolveLaunchModel(undefined, undefined, {
-        provider: "openrouter",
-        id: "anthropic/claude-sonnet-4",
-      }),
-      "openrouter/anthropic/claude-sonnet-4",
-    );
-    assert.equal(
-      testApi.resolveLaunchModel("openai/gpt-5", "anthropic/agent-default", {
-        provider: "openrouter",
-        id: "fallback",
-      }),
-      "openai/gpt-5",
-    );
-    assert.throws(
-      () => testApi.resolveLaunchModel(undefined, undefined, undefined),
-      /without an active parent model/,
-    );
-  });
-
-  it("does not pass the active Pi model to Claude CLI", () => {
-    const activeModel = { provider: "openrouter", id: "z-ai/glm-5.3" };
-    assert.equal(
-      testApi.resolveCliLaunchModel("claude", undefined, undefined, activeModel),
-      undefined,
-    );
-    assert.equal(
-      testApi.resolveCliLaunchModel("claude", "sonnet", undefined, activeModel),
-      "sonnet",
-    );
-    assert.equal(
-      testApi.resolveCliLaunchModel("pi", undefined, undefined, activeModel),
-      "openrouter/z-ai/glm-5.3",
-    );
-  });
-
   it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {
     withTempDir((d) => {
       const parts: string[] = [];
@@ -2181,6 +2151,90 @@ describe("subagent discovery", () => {
       testApi.buildPiPromptArgs({ effectiveSkills: "review", taskDelivery: "direct", taskArg: "do the task" }),
       ["/skill:review", "do the task"],
     );
+  });
+
+  it("shows the selected project profiles in the tool and list result", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { global: { model: "test/global", thinking: "off", guidance: "Global work" } },
+      }));
+      writeFileSync(join(projectDir, ".pi", "subagent-profiles.json"), JSON.stringify({
+        profiles: {
+          quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" },
+          deep: { model: "test/deep", thinking: "high", guidance: "Complex tasks" },
+        },
+      }));
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const spawn = registeredTools.find((tool) => tool.name === "subagent");
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      assert.match(spawn.description, /quick: Focused tasks/);
+      assert.match(spawn.promptSnippet, /deep: Complex tasks/);
+      assert.doesNotMatch(spawn.description, /global: Global work/);
+      const result = await list.execute();
+      assert.deepEqual(Object.keys(result.details.profiles), ["quick", "deep"]);
+      assert.match(result.content[0].text, /quick: Focused tasks/);
+    });
+  });
+
+  it("reports a broken project policy without using global choices", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir, globalDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { global: { model: "test/global", thinking: "off", guidance: "Global work" } },
+      }));
+      writeFileSync(join(projectDir, ".pi", "subagent-profiles.json"), "{bad json");
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const spawn = registeredTools.find((tool) => tool.name === "subagent");
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      assert.match(spawn.description, /Profile policy error.*subagent-profiles\.json/i);
+      assert.doesNotMatch(spawn.description, /global: Global work/);
+      await assert.rejects(() => list.execute(), /Invalid JSON.*subagent-profiles\.json/);
+    });
+  });
+
+  it("refreshes profile descriptions when a new session starts", async () => {
+    await withIsolatedAgentEnv(async ({ projectDir }) => {
+      execFileSync("git", ["init", "-q", projectDir]);
+      const path = join(projectDir, ".pi", "subagent-profiles.json");
+      writeFileSync(path, JSON.stringify({ profiles: {
+        quick: { model: "test/quick", thinking: "off", guidance: "First session" },
+      } }));
+      const { api, eventHandlers, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      assert.match(registeredTools.find((tool) => tool.name === "subagent").description, /quick: First session/);
+      writeFileSync(path, JSON.stringify({ profiles: {
+        deep: { model: "test/deep", thinking: "high", guidance: "Next session" },
+      } }));
+      for (const handler of eventHandlers.get("session_start") ?? []) {
+        await handler({ reason: "new" }, { cwd: projectDir, hasUI: false });
+      }
+      const spawn = registeredTools.filter((tool) => tool.name === "subagent").at(-1);
+      const list = registeredTools.filter((tool) => tool.name === "subagents_list").at(-1);
+      assert.match(spawn.description, /deep: Next session/);
+      assert.doesNotMatch(spawn.description, /quick: First session/);
+      assert.match(spawn.promptSnippet, /deep: Next session/);
+      assert.deepEqual(Object.keys((await list.execute()).details.profiles), ["deep"]);
+    });
+  });
+
+  it("lists profiles even when no agent definitions are visible", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir, projectAgentsDir }) => {
+      writeFileSync(join(globalDir, "subagent-profiles.json"), JSON.stringify({
+        profiles: { quick: { model: "test/quick", thinking: "off", guidance: "Focused tasks" } },
+      }));
+      for (const name of ["scout", "worker", "researcher"]) {
+        writeAgentFile(projectAgentsDir, name, `name: ${name}\ndisable-model-invocation: true`);
+      }
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+      const list = registeredTools.find((tool) => tool.name === "subagents_list");
+      const result = await list.execute();
+      assert.deepEqual(result.details.profiles.quick.thinking, "off");
+      assert.match(result.content[0].text, /quick: Focused tasks/);
+    });
   });
 
   it("lists visible agents from discovery", async () => {
@@ -2807,13 +2861,6 @@ describe("tool registration", () => {
     });
   });
 
-  it("persists resumable names only for Pi-backed sessions", () => {
-    const testApi = (subagentsModule as any).__test__;
-    assert.equal(testApi.hasResumablePiSession({}), true);
-    assert.equal(testApi.hasResumablePiSession({ cli: "pi" }), true);
-    assert.equal(testApi.hasResumablePiSession({ cli: "claude" }), false);
-  });
-
   it("rejects a top-level spawn with no agent and no fork", async () => {
     const { api, registeredTools } = createMockExtensionApi();
     (subagentsModule as any).default(api);
@@ -2840,7 +2887,7 @@ describe("tool registration", () => {
     assert.match(result.content[0].text, /not a known agent/i);
   });
 
-  it("exposes a debloated schema: agent+task required, name/model/cwd optional, no override knobs", () => {
+  it("requires a profile instead of a model override", () => {
     const { api, registeredTools } = createMockExtensionApi();
     (subagentsModule as any).default(api);
 
@@ -2850,13 +2897,13 @@ describe("tool registration", () => {
     const props = subagentTool.parameters.properties;
     assert.deepEqual(
       Object.keys(props).sort(),
-      ["agent", "cwd", "model", "name", "task"],
-      "only agent/task/name/model/cwd should remain",
+      ["agent", "cwd", "name", "profile", "task"],
+      "only agent/task/profile/name/cwd should remain",
     );
     assert.deepEqual(
       [...(subagentTool.parameters.required ?? [])].sort(),
-      ["agent", "task"],
-      "agent and task must be required",
+      ["agent", "profile", "task"],
+      "agent, task, and profile must be required",
     );
     // `name` is now optional and purely cosmetic.
     assert.match(props.name.description, /cosmetic/i);
@@ -2864,6 +2911,41 @@ describe("tool registration", () => {
     for (const gone of ["tools", "skills", "systemPrompt", "fork", "interactive", "resumeSessionId"]) {
       assert.equal(props[gone], undefined, `expected ${gone} param to be removed`);
     }
+  });
+
+  it("prepares independent profile choices and rejects unsupported thinking", () => {
+    const policy = {
+      source: "/project/.pi/subagent-profiles.json",
+      profiles: {
+        quick: { model: "test/plain", thinking: "off", guidance: "Simple tasks" },
+        deep: { model: "test/deep", thinking: "high", guidance: "Complex tasks" },
+      },
+    };
+    const registry = {
+      find(provider: string, id: string) {
+        if (provider !== "test") return undefined;
+        return { provider, id, reasoning: id === "deep" };
+      },
+    };
+    const testApi = (subagentsModule as any).__test__;
+    const choices = ["quick", "deep"].map((name) => testApi.prepareProfileSpawn(policy, name, registry));
+    assert.deepEqual(choices.map((choice: any) => [choice.model.id, choice.thinking]), [["plain", "off"], ["deep", "high"]]);
+    assert.throws(() => testApi.prepareProfileSpawn({ ...policy, profiles: { bad: { ...policy.profiles.quick, thinking: "high" } } }, "bad", registry), /supports off/);
+  });
+
+  it("rejects obsolete model and unknown spawn arguments", async () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const spawn = registeredTools.find((tool) => tool.name === "subagent");
+    assert.equal(spawn.parameters.additionalProperties, false);
+    await assert.rejects(
+      () => spawn.execute("call-1", { agent: "scout", task: "Read code", profile: "quick", model: "test/other" }),
+      /Unsupported subagent parameter "model"/,
+    );
+    await assert.rejects(
+      () => spawn.execute("call-2", { agent: "scout", task: "Read code", profile: "quick", thinking: "high" }),
+      /Unsupported subagent parameter "thinking"/,
+    );
   });
 
   it("renders partial subagent tool-call args without throwing", () => {

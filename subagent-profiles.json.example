@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "quick": {
+      "model": "provider/fast-model",
+      "thinking": "low",
+      "guidance": "Use for focused, routine tasks."
+    },
+    "deep": {
+      "model": "provider/strong-model",
+      "thinking": "high",
+      "guidance": "Use for complex tasks."
+    }
+  }
+}
