@@ -5,8 +5,9 @@
  * sending commands, reading screen output, and closing panes.
  * No LLM calls — fast and free.
  *
- * Run inside tmux:
- *   tmux new 'npm run test:integration'
+ * Run with `npm run test:integration`.
+ * The runner starts a private tmux server for the tests.
+ * The tests do not create panes in your own tmux session.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -50,7 +51,7 @@ const FOCUS_TEST_PANE_STARTUP_MS = 2500;
 
 if (backends.length === 0) {
   console.log("⚠️  tmux is not available — skipping tmux-surface integration tests");
-  console.log("   Run inside tmux to enable these tests.");
+  console.log("   Run with `npm run test:integration`. It starts a private tmux server.");
 }
 
 for (const backend of backends) {
@@ -74,11 +75,11 @@ for (const backend of backends) {
 
       const childA = createTrackedSurface(env, "focus-child-a");
       await sleep(FOCUS_TEST_PANE_STARTUP_MS);
-      assert.equal(getFocusedSurface(), anchor);
+      assert.equal(getFocusedSurface(anchor), anchor);
 
       const childB = createTrackedSurface(env, "focus-child-b");
       await sleep(FOCUS_TEST_PANE_STARTUP_MS);
-      assert.equal(getFocusedSurface(), anchor);
+      assert.equal(getFocusedSurface(anchor), anchor);
 
       // Keep focus markers short enough to remain contiguous in narrow CI panes.
       const markerA = Math.random().toString(36).slice(2, 6);
@@ -90,7 +91,7 @@ for (const backend of backends) {
         waitForScreen(childA, new RegExp(`FOCUS_A_${markerA}`), 20_000, 50),
         waitForScreen(childB, new RegExp(`FOCUS_B_${markerB}`), 20_000, 50),
       ]);
-      assert.equal(getFocusedSurface(), anchor);
+      assert.equal(getFocusedSurface(anchor), anchor);
     });
 
     it("creates a surface, sends a command, reads output, and closes it", async () => {

@@ -98,16 +98,17 @@ export function focusSurface(surface: string): void {
   execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
 }
 
-export function getFocusedSurface(): string | null {
-  try {
-    const panes = execFileSync("tmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
-      encoding: "utf8",
-    });
-    const activeLine = panes.split("\n").find((line) => line.endsWith(" 1"));
-    return activeLine?.split(" ")[0] ?? null;
-  } catch {
-    return null;
-  }
+/**
+ * Return the active pane in the window that contains `windowPane`.
+ * Target the window explicitly. Without a target, tmux uses the current window
+ * of the attached client, which changes when a person uses tmux during a test.
+ */
+export function getFocusedSurface(windowPane: string): string | null {
+  const panes = execFileSync("tmux", ["list-panes", "-t", windowPane, "-F", "#{pane_id} #{pane_active}"], {
+    encoding: "utf8",
+  });
+  const activeLine = panes.split("\n").find((line) => line.endsWith(" 1"));
+  return activeLine?.split(" ")[0] ?? null;
 }
 
 export async function waitForFocusedSurface(
@@ -116,13 +117,13 @@ export async function waitForFocusedSurface(
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    if (getFocusedSurface() === surface) return;
+    if (getFocusedSurface(surface) === surface) return;
     await sleep(200);
   }
 
   throw new Error(
     `Timeout (${timeout}ms) waiting for focused tmux pane ${surface}; ` +
-      `current focus is ${getFocusedSurface() ?? "unknown"}`,
+      `current focus is ${getFocusedSurface(surface) ?? "unknown"}`,
   );
 }
 

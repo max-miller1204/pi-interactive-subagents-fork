@@ -82,8 +82,18 @@ The selected model and thinking level are saved in the child's loadout snapshot.
 subagent_message({ name: "scout", message: "Also check the auth middleware" });
 ```
 
-- **Running** — the message is typed into the live pane (newlines flattened) and picked up at the next turn boundary. The call returns immediately; the eventual completion still arrives as a steer message.
-- **Finished Pi session** — the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
+- **Running:** the parent writes the message to the sub-agent's steer inbox (`<session>.steer/`).
+  The sub-agent reads the inbox and handles the message at its next turn boundary.
+  Newlines are kept.
+  The call returns immediately, and the eventual completion still arrives as a steer message.
+  Before a sub-agent exits, it closes its inbox.
+  A message sent after that point is rejected with an error, so resend it after the result arrives.
+  If a sub-agent stops before it reads a queued message (for example, its pane is closed), its result lists the message as not delivered.
+- **Finished Pi session:** the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
+
+The message must contain at least one letter or digit.
+A placeholder such as `"…"` is rejected.
+
 Every Pi-backed spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name is not registered, the session file is gone, the session predates extension-manifest snapshots, or a pinned extension or skill file is no longer installed.
 
 **Resume replays the original sandbox.** At spawn time the fully resolved loadout — tool allowlist, exact tool/provider/control extension entry paths, skill policy and pinned skill files, model identity, thinking level, system prompt, spawn whitelist, cwd, and Pi config-directory path — is snapshotted to `<session>.loadout.json`. Resume replays those pinned entry paths without resolving strict skill or tool paths from the current parent. Extension discovery stays disabled. Normal skill discovery stays disabled for `none` and `allowlist`. Trusted pinned extensions can still contribute resources at runtime, as described in [Skill access control](#skill-access-control). Mutable request configuration read from the snapshotted agent directory, including `models.json`, authentication state, and provider/model headers, remains external to the sidecar and is not frozen across resume.
